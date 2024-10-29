@@ -1,32 +1,20 @@
-use std::marker::PhantomData;
-
-use alloy_network::Network;
-use alloy_provider::Provider;
-use alloy_transport::Transport;
 use eyre::Result;
-use log::{debug, error, info};
 use tokio::sync::broadcast::error::RecvError;
+use tracing::{debug, error};
 
-use debug_provider::DebugProviderExt;
 use defi_blockchain::Blockchain;
-use defi_entities::{Market, MarketState};
-use defi_events::BlockLogs;
-use loom_actors::{subscribe, Accessor, Actor, ActorResult, Broadcaster, Consumer, SharedState, WorkerResult};
-use loom_actors_macros::{Accessor, Consumer};
+use defi_events::{MessageBlockLogs, Task};
+use defi_pools::PoolsConfig;
+use loom_actors::{subscribe, Actor, ActorResult, Broadcaster, Consumer, Producer, WorkerResult};
+use loom_actors_macros::{Consumer, Producer};
 
 use crate::market::logs_parser::process_log_entries;
 
-pub async fn new_pool_worker<P, T, N>(
-    client: P,
-    market: SharedState<Market>,
-    market_state: SharedState<MarketState>,
-    log_update_rx: Broadcaster<BlockLogs>,
-) -> WorkerResult
-where
-    T: Transport + Clone,
-    N: Network,
-    P: Provider<T, N> + DebugProviderExt<T, N> + Send + Sync + Clone + 'static,
-{
+pub async fn new_pool_worker(
+    log_update_rx: Broadcaster<MessageBlockLogs>,
+    pools_config: PoolsConfig,
+    tasks_tx: Broadcaster<Task>,
+) -> WorkerResult {
     subscribe!(log_update_rx);
 
     loop {
@@ -34,17 +22,14 @@ where
             msg = log_update_rx.recv() => {
                 debug!("Log update");
 
-                let log_update : Result<BlockLogs, RecvError>  = msg;
+                let log_update : Result<MessageBlockLogs, RecvError>  = msg;
                 match log_update {
                     Ok(log_update_msg)=>{
-                        if let Ok(pool_address_vec) = process_log_entries(
-                                client.clone(),
-                                market.clone(),
-                                market_state.clone(),
-                                log_update_msg.logs,
-                        ).await {
-                            info!("Pools added : {:?}", pool_address_vec)
-                        }
+                        process_log_entries(
+                                log_update_msg.inner.logs,
+                                &pools_config,
+                                tasks_tx.clone(),
+                        ).await?
                     }
                     Err(e)=>{
                         error!("block_update error {}", e)
@@ -56,46 +41,31 @@ where
     }
 }
 
-#[derive(Accessor, Consumer)]
-pub struct NewPoolLoaderActor<P, T, N> {
-    client: P,
-    #[accessor]
-    market: Option<SharedState<Market>>,
-    #[accessor]
-    market_state: Option<SharedState<MarketState>>,
+#[derive(Consumer, Producer)]
+pub struct NewPoolLoaderActor {
     #[consumer]
-    log_update_rx: Option<Broadcaster<BlockLogs>>,
-    _t: PhantomData<T>,
-    _n: PhantomData<N>,
+    log_update_rx: Option<Broadcaster<MessageBlockLogs>>,
+    pools_config: PoolsConfig,
+    #[producer]
+    tasks_tx: Option<Broadcaster<Task>>,
 }
 
-impl<P, T, N> NewPoolLoaderActor<P, T, N>
-where
-    T: Transport + Clone,
-    N: Network,
-    P: Provider<T, N> + Send + Sync + Clone + 'static,
-{
-    pub fn new(client: P) -> Self {
-        NewPoolLoaderActor { client, market: None, market_state: None, log_update_rx: None, _t: PhantomData, _n: PhantomData }
+impl NewPoolLoaderActor {
+    pub fn new(pools_config: PoolsConfig) -> Self {
+        NewPoolLoaderActor { log_update_rx: None, pools_config, tasks_tx: None }
     }
 
     pub fn on_bc(self, bc: &Blockchain) -> Self {
-        Self { market: Some(bc.market()), market_state: Some(bc.market_state()), log_update_rx: Some(bc.new_block_logs_channel()), ..self }
+        Self { log_update_rx: Some(bc.new_block_logs_channel()), tasks_tx: Some(bc.tasks_channel()), ..self }
     }
 }
 
-impl<P, T, N> Actor for NewPoolLoaderActor<P, T, N>
-where
-    T: Transport + Clone,
-    N: Network,
-    P: Provider<T, N> + DebugProviderExt<T, N> + Send + Sync + Clone + 'static,
-{
+impl Actor for NewPoolLoaderActor {
     fn start(&self) -> ActorResult {
         let task = tokio::task::spawn(new_pool_worker(
-            self.client.clone(),
-            self.market.clone().unwrap(),
-            self.market_state.clone().unwrap(),
             self.log_update_rx.clone().unwrap(),
+            self.pools_config.clone(),
+            self.tasks_tx.clone().unwrap(),
         ));
         Ok(vec![task])
     }

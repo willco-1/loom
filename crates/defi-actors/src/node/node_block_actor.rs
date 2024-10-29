@@ -2,14 +2,12 @@ use std::marker::PhantomData;
 
 use alloy_network::Ethereum;
 use alloy_provider::Provider;
-use alloy_rpc_types::Block;
 use alloy_transport::Transport;
 use tokio::task::JoinHandle;
 
 use debug_provider::DebugProviderExt;
 use defi_blockchain::Blockchain;
-use defi_events::{BlockLogs, BlockStateUpdate, MessageBlockHeader};
-use defi_types::ChainParameters;
+use defi_events::{MessageBlock, MessageBlockHeader, MessageBlockLogs, MessageBlockStateUpdate};
 use loom_actors::{Actor, ActorResult, Broadcaster, Producer, WorkerResult};
 use loom_actors_macros::Producer;
 
@@ -19,40 +17,34 @@ use crate::node::node_block_state_worker::new_node_block_state_worker;
 use crate::node::node_block_with_tx_worker::new_block_with_tx_worker;
 use crate::node::reth_worker::reth_node_worker_starter;
 
-pub fn new_node_block_starer<P, T>(
+pub fn new_node_block_workers_starter<P, T>(
     client: P,
-    chain_parameters: ChainParameters,
     new_block_headers_channel: Option<Broadcaster<MessageBlockHeader>>,
-    new_block_with_tx_channel: Option<Broadcaster<Block>>,
-    new_block_logs_channel: Option<Broadcaster<BlockLogs>>,
-    new_block_state_update_channel: Option<Broadcaster<BlockStateUpdate>>,
+    new_block_with_tx_channel: Option<Broadcaster<MessageBlock>>,
+    new_block_logs_channel: Option<Broadcaster<MessageBlockLogs>>,
+    new_block_state_update_channel: Option<Broadcaster<MessageBlockStateUpdate>>,
 ) -> ActorResult
 where
     T: Transport + Clone,
     P: Provider<T, Ethereum> + DebugProviderExt<T, Ethereum> + Send + Sync + Clone + 'static,
 {
-    let new_block_hash_channel = Broadcaster::new(10);
+    let new_header_internal_channel = Broadcaster::new(10);
     let mut tasks: Vec<JoinHandle<WorkerResult>> = Vec::new();
 
     if let Some(channel) = new_block_with_tx_channel {
-        tasks.push(tokio::task::spawn(new_block_with_tx_worker(client.clone(), new_block_hash_channel.clone(), channel)));
+        tasks.push(tokio::task::spawn(new_block_with_tx_worker(client.clone(), new_header_internal_channel.clone(), channel)));
     }
 
     if let Some(channel) = new_block_headers_channel {
-        tasks.push(tokio::task::spawn(new_node_block_header_worker(
-            client.clone(),
-            chain_parameters,
-            new_block_hash_channel.clone(),
-            channel,
-        )));
+        tasks.push(tokio::task::spawn(new_node_block_header_worker(client.clone(), new_header_internal_channel.clone(), channel)));
     }
 
     if let Some(channel) = new_block_logs_channel {
-        tasks.push(tokio::task::spawn(new_node_block_logs_worker(client.clone(), new_block_hash_channel.clone(), channel)));
+        tasks.push(tokio::task::spawn(new_node_block_logs_worker(client.clone(), new_header_internal_channel.clone(), channel)));
     }
 
     if let Some(channel) = new_block_state_update_channel {
-        tasks.push(tokio::task::spawn(new_node_block_state_worker(client.clone(), new_block_hash_channel.clone(), channel)));
+        tasks.push(tokio::task::spawn(new_node_block_state_worker(client.clone(), new_header_internal_channel.clone(), channel)));
     }
 
     Ok(tasks)
@@ -67,7 +59,7 @@ pub struct NodeBlockActorConfig {
 }
 
 impl NodeBlockActorConfig {
-    pub fn new() -> Self {
+    pub fn all_disabled() -> Self {
         Self { block_header: false, block_with_tx: false, block_logs: false, block_state_update: false }
     }
 
@@ -96,26 +88,19 @@ impl NodeBlockActorConfig {
     }
 }
 
-impl Default for NodeBlockActorConfig {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[derive(Producer)]
 pub struct NodeBlockActor<P, T> {
     client: P,
-    chain_parameters: ChainParameters,
     config: NodeBlockActorConfig,
     reth_db_path: Option<String>,
     #[producer]
     block_header_channel: Option<Broadcaster<MessageBlockHeader>>,
     #[producer]
-    block_with_tx_channel: Option<Broadcaster<Block>>,
+    block_with_tx_channel: Option<Broadcaster<MessageBlock>>,
     #[producer]
-    block_logs_channel: Option<Broadcaster<BlockLogs>>,
+    block_logs_channel: Option<Broadcaster<MessageBlockLogs>>,
     #[producer]
-    block_state_update_channel: Option<Broadcaster<BlockStateUpdate>>,
+    block_state_update_channel: Option<Broadcaster<MessageBlockStateUpdate>>,
     _t: PhantomData<T>,
 }
 
@@ -131,7 +116,6 @@ where
     pub fn new(client: P, config: NodeBlockActorConfig) -> NodeBlockActor<P, T> {
         NodeBlockActor {
             client,
-            chain_parameters: ChainParameters::ethereum(),
             config,
             reth_db_path: None,
             block_header_channel: None,
@@ -148,7 +132,6 @@ where
 
     pub fn on_bc(self, bc: &Blockchain) -> Self {
         Self {
-            chain_parameters: bc.chain_parameters(),
             block_header_channel: if self.config.block_header { Some(bc.new_block_headers_channel()) } else { None },
             block_with_tx_channel: if self.config.block_with_tx { Some(bc.new_block_with_tx_channel()) } else { None },
             block_logs_channel: if self.config.block_logs { Some(bc.new_block_logs_channel()) } else { None },
@@ -168,7 +151,6 @@ where
             //RETH DB
             Some(db_path) => reth_node_worker_starter(
                 self.client.clone(),
-                self.chain_parameters.clone(),
                 db_path.clone(),
                 self.block_header_channel.clone(),
                 self.block_with_tx_channel.clone(),
@@ -176,9 +158,8 @@ where
                 self.block_state_update_channel.clone(),
             ),
             //RPC
-            None => new_node_block_starer(
+            None => new_node_block_workers_starter(
                 self.client.clone(),
-                self.chain_parameters.clone(),
                 self.block_header_channel.clone(),
                 self.block_with_tx_channel.clone(),
                 self.block_logs_channel.clone(),
@@ -195,13 +176,13 @@ where
 mod test {
     use alloy_provider::ProviderBuilder;
     use alloy_rpc_client::{ClientBuilder, WsConnect};
-    use alloy_rpc_types::{Block, Header};
-    use log::{debug, error, info};
+    use alloy_rpc_types::Header;
     use tokio::select;
+    use tracing::{debug, error, info};
 
     use crate::node::node_block_actor::NodeBlockActorConfig;
     use crate::NodeBlockActor;
-    use defi_events::{BlockLogs, BlockStateUpdate, MessageBlockHeader};
+    use defi_events::{MessageBlock, MessageBlockHeader, MessageBlockLogs, MessageBlockStateUpdate};
     use eyre::Result;
     use loom_actors::{Actor, Broadcaster, Producer};
 
@@ -212,9 +193,9 @@ mod test {
 
         info!("Creating channels");
         let new_block_headers_channel: Broadcaster<MessageBlockHeader> = Broadcaster::new(10);
-        let new_block_with_tx_channel: Broadcaster<Block> = Broadcaster::new(10);
-        let new_block_state_update_channel: Broadcaster<BlockStateUpdate> = Broadcaster::new(10);
-        let new_block_logs_channel: Broadcaster<BlockLogs> = Broadcaster::new(10);
+        let new_block_with_tx_channel: Broadcaster<MessageBlock> = Broadcaster::new(10);
+        let new_block_state_update_channel: Broadcaster<MessageBlockStateUpdate> = Broadcaster::new(10);
+        let new_block_logs_channel: Broadcaster<MessageBlockLogs> = Broadcaster::new(10);
 
         let node_url = std::env::var("DEVNET_WS")?;
 
@@ -252,15 +233,15 @@ mod test {
                     debug!("Block header received : {:?}", msg);
                 }
                 msg_fut = new_block_with_tx_rx.recv() => {
-                    let msg : Block = msg_fut?;
+                    let msg : MessageBlock = msg_fut?;
                     debug!("Block withtx received : {:?}", msg);
                 }
                 msg_fut = new_block_logs_rx.recv() => {
-                    let msg : BlockLogs = msg_fut?;
+                    let msg : MessageBlockLogs = msg_fut?;
                     debug!("Block logs received : {:?}", msg);
                 }
                 msg_fut = new_block_state_update_rx.recv() => {
-                    let msg : BlockStateUpdate = msg_fut?;
+                    let msg : MessageBlockStateUpdate = msg_fut?;
                     debug!("Block state update received : {:?}", msg);
                 }
 

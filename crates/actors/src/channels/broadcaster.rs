@@ -5,6 +5,7 @@ use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::SendError;
 use tokio::sync::broadcast::Receiver;
 use tokio::sync::RwLock;
+use tracing::error;
 
 #[derive(Clone)]
 pub struct Broadcaster<T>
@@ -32,7 +33,10 @@ impl<T: Clone + Send + Sync + 'static> Broadcaster<T> {
                 Ok(size) => Ok(size),
                 Err(_) => Err(eyre!("ERROR_SEND")),
             },
-            Err(_) => Err(eyre!("ERROR_SEND")),
+            Err(e) => {
+                error!("self.sender.try_write {}", e);
+                Err(eyre!("ERROR_WRITE_LOCK"))
+            }
         }
     }
 

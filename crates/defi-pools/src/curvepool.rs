@@ -1,18 +1,18 @@
 use std::sync::Arc;
 
-use alloy_primitives::{Address, Bytes, U256};
+use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_provider::{Network, Provider};
 use alloy_sol_types::SolCall;
 use alloy_transport::Transport;
-use eyre::{eyre, Result};
-use log::error;
-use revm::primitives::Env;
-
 use defi_abi::IERC20;
+use defi_address_book::TokenAddress;
 use defi_entities::required_state::RequiredState;
 use defi_entities::{AbiSwapEncoder, Pool, PoolClass, PoolProtocol, PreswapRequirement};
-use loom_revm_db::LoomInMemoryDB;
+use eyre::{eyre, Result};
+use loom_revm_db::LoomDBType;
 use loom_utils::evm::evm_call;
+use revm::primitives::Env;
+use tracing::error;
 
 use crate::protocols::{CurveCommonContract, CurveContract, CurveProtocol};
 
@@ -100,9 +100,9 @@ where
         let mut is_native = false;
 
         for tkn in tokens.iter_mut() {
-            if *tkn == "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE".parse::<Address>().unwrap() {
+            if *tkn == address!("EeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE") {
                 //return Err(eyre!("ETH_CURVE_POOL_NOT_SUPPORTED"));
-                *tkn = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".parse().unwrap();
+                *tkn = TokenAddress::WETH;
                 is_native = true;
             }
         }
@@ -197,7 +197,7 @@ where
 
     fn calculate_out_amount(
         &self,
-        state_db: &LoomInMemoryDB,
+        state_db: &LoomDBType,
         env: Env,
         token_address_from: &Address,
         token_address_to: &Address,
@@ -247,7 +247,7 @@ where
 
     fn calculate_in_amount(
         &self,
-        state_db: &LoomInMemoryDB,
+        state_db: &LoomDBType,
         env: Env,
         token_address_from: &Address,
         token_address_to: &Address,
@@ -511,7 +511,6 @@ where
 #[cfg(test)]
 mod tests {
     use eyre::Result;
-    use std::sync::Arc;
 
     use alloy_primitives::U256;
     use alloy_provider::Provider;
@@ -520,10 +519,8 @@ mod tests {
     use defi_entities::required_state::RequiredStateReader;
     use defi_entities::{MarketState, Pool};
     use env_logger::Env as EnvLog;
-    use log::debug;
-    use loom_revm_db::fast_cache_db::FastCacheDB;
-    use loom_revm_db::LoomInMemoryDB;
-    use revm::db::EmptyDB;
+    use loom_revm_db::LoomDBType;
+    use tracing::debug;
 
     use crate::protocols::CurveProtocol;
     use crate::CurvePool;
@@ -536,7 +533,7 @@ mod tests {
 
         let client = AnvilDebugProviderFactory::from_node_on_block(node_url, 20045799).await?;
 
-        let mut market_state = MarketState::new(LoomInMemoryDB::new(Arc::new(FastCacheDB::new(EmptyDB::default()))));
+        let mut market_state = MarketState::new(LoomDBType::new());
 
         let curve_contracts = CurveProtocol::get_contracts_vec(client.clone());
 
@@ -548,8 +545,8 @@ mod tests {
             let state_required = RequiredStateReader::fetch_calls_and_slots(client.clone(), state_required, None).await.unwrap();
             debug!("Pool state fetched {} {}", pool.address, state_required.len());
 
-            market_state.add_state(&state_required);
-            debug!("Pool : {} Accs : {} Storage : {}", pool.address, market_state.accounts_len(), market_state.storage_len());
+            market_state.state_db.apply_geth_update(state_required);
+            debug!("Pool : {} Accs : {} Storage : {}", pool.address, market_state.state_db.accounts_len(), market_state.storage_len());
 
             let block_header = client.get_block_by_number(BlockNumberOrTag::Latest, false).await.unwrap().unwrap().header;
             debug!("Block {} {}", block_header.number, block_header.timestamp);

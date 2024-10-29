@@ -1,21 +1,21 @@
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 
-use alloy_primitives::{Address, TxHash};
+use alloy_primitives::{Address, BlockNumber, TxHash};
 use alloy_rpc_types::Transaction;
 use revm::primitives::Env;
 
 use defi_entities::PoolWrapper;
 use defi_types::GethStateUpdateVec;
-use loom_revm_db::LoomInMemoryDB;
+use loom_revm_db::LoomDBType;
 use loom_utils::evm::env_for_block;
 
 #[derive(Clone, Debug)]
 pub struct StateUpdateEvent {
-    pub block: u64,
-    pub block_timestamp: u64,
-    pub gas_fee: u128,
-    market_state: LoomInMemoryDB,
+    pub next_block_number: BlockNumber,
+    pub next_block_timestamp: u64,
+    pub next_base_fee: u64,
+    market_state: LoomDBType,
     state_update: GethStateUpdateVec,
     state_required: Option<GethStateUpdateVec>,
     directions: BTreeMap<PoolWrapper, Vec<(Address, Address)>>,
@@ -28,10 +28,10 @@ pub struct StateUpdateEvent {
 #[allow(clippy::too_many_arguments)]
 impl StateUpdateEvent {
     pub fn new(
-        block: u64,
-        block_timestamp: u64,
-        gas_fee: u128,
-        market_state: LoomInMemoryDB,
+        next_block: u64,
+        next_block_timestamp: u64,
+        next_base_fee: u64,
+        market_state: LoomDBType,
         state_update: GethStateUpdateVec,
         state_required: Option<GethStateUpdateVec>,
         directions: BTreeMap<PoolWrapper, Vec<(Address, Address)>>,
@@ -41,9 +41,9 @@ impl StateUpdateEvent {
         tips_pct: u32,
     ) -> StateUpdateEvent {
         StateUpdateEvent {
-            block,
-            block_timestamp,
-            gas_fee,
+            next_block_number: next_block,
+            next_block_timestamp,
+            next_base_fee,
             state_update,
             state_required,
             market_state,
@@ -56,14 +56,14 @@ impl StateUpdateEvent {
     }
 
     pub fn evm_env(&self) -> Env {
-        env_for_block(self.block, self.block_timestamp)
+        env_for_block(self.next_block_number, self.next_block_timestamp)
     }
 
     pub fn directions(&self) -> &BTreeMap<PoolWrapper, Vec<(Address, Address)>> {
         &self.directions
     }
 
-    pub fn market_state(&self) -> &LoomInMemoryDB {
+    pub fn market_state(&self) -> &LoomDBType {
         &self.market_state
     }
 

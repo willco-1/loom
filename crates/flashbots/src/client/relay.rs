@@ -5,14 +5,14 @@ use crate::client::jsonrpc::{JsonRpcError, Request, Response};
 use alloy_primitives::{hex, keccak256};
 use alloy_signer::Signer;
 use alloy_signer_local::PrivateKeySigner;
-use log::{debug, trace};
 use reqwest::{Client, Error as ReqwestError};
 use serde::{de::DeserializeOwned, Serialize};
 use thiserror::Error;
+use tracing::{debug, trace};
 use url::Url;
 
 /// Configuration for a Flashbots relay.
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RelayConfig {
     pub id: u16,
     pub name: String,
@@ -27,7 +27,7 @@ pub struct RelayConfig {
 ///
 /// **Note**: You probably do not want to use this directly, unless
 /// you want to interact directly with the Relay. Most users should use
-/// [`FlashbotsMiddleware`](crate::FlashbotsMiddleware) instead.
+/// [`FlashbotsClient`](crate::FlashbotsClient) instead.
 #[derive(Clone)]
 pub struct Relay {
     id: Arc<AtomicU64>,
@@ -107,7 +107,7 @@ impl Relay {
             }
             Ok(_) => {
                 let text = res.text().await?;
-                debug!("Flashbots repsonse: {}", text);
+                debug!("Flashbots response: {}", text);
                 let res: Response<R> = serde_json::from_str(&text).map_err(|err| RelayError::ResponseSerdeJson { err, text })?;
 
                 Ok(res.data.into_result()?)
@@ -139,7 +139,7 @@ impl Relay {
             }
             Ok(_) => {
                 let text = res.text().await?;
-                debug!("Flashbots repsonse: {}", text);
+                debug!("Flashbots response: {}", text);
                 let res: Response<R> = serde_json::from_str(&text).map_err(|err| RelayError::ResponseSerdeJson { err, text })?;
 
                 Ok(res.data.into_result()?)

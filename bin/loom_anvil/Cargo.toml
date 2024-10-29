@@ -1,6 +1,6 @@
 [package]
 name = "loom_anvil"
-version.workspace = true
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -9,53 +9,53 @@ repository.workspace = true
 exclude.workspace = true
 
 [dependencies]
-tokio.workspace = true
-env_logger.workspace = true
-log.workspace = true
-eyre.workspace = true
-futures.workspace = true
-clap.workspace = true
-serde.workspace = true
-toml.workspace = true
-
-
 debug-provider.workspace = true
+defi-actors.workspace = true
+defi-address-book.workspace = true
+defi-entities.workspace = true
+defi-events.workspace = true
+defi-pools.workspace = true
+defi-types.workspace = true
 flashbots.workspace = true
-
-loom-topology.workspace = true
 loom-actors.workspace = true
 loom-actors-macros.workspace = true
+loom-multicaller.workspace = true
 loom-revm-db.workspace = true
 loom-utils.workspace = true
-defi-entities.workspace = true
-defi-types.workspace = true
-defi-actors.workspace = true
-defi-pools.workspace = true
-defi-events.workspace = true
 
 
-loom-multicaller.workspace = true
+clap.workspace = true
+eyre.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+wiremock.workspace = true
 
+# alloy
 alloy-consensus.workspace = true
+alloy-node-bindings.workspace = true
 alloy-primitives.workspace = true
 alloy-provider.workspace = true
-alloy-transport-ws.workspace = true
-alloy-transport-http.workspace = true
-alloy-transport-ipc.workspace = true
 alloy-rpc-types.workspace = true
 alloy-rpc-types-trace.workspace = true
-alloy-node-bindings.workspace = true
+alloy-transport-http.workspace = true
+alloy-transport-ipc.workspace = true
+alloy-transport-ws.workspace = true
 
 revm.workspace = true
 
 [dev-dependencies]
-criterion = { version = "0.5.1", features = ["async_tokio"] }
-num_cpus.workspace = true
 chrono.workspace = true
+criterion = { version = "0.5.1", features = ["async_tokio"] }
+futures.workspace = true
+num_cpus.workspace = true
 rand.workspace = true
 rayon.workspace = true
-futures.workspace = true
 
 [[bench]]
-name = "benchmark"
 harness = false
+name = "benchmark"

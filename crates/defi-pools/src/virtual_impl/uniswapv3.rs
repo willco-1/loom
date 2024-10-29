@@ -1,15 +1,12 @@
-use std::collections::HashMap;
-
 use alloy_primitives::{Address, I256, U256};
 use eyre::eyre;
-use uniswap_v3_math::tick_bitmap::position;
 use uniswap_v3_math::tick_math::{MAX_SQRT_RATIO, MAX_TICK, MIN_SQRT_RATIO, MIN_TICK};
 
-use defi_entities::Pool;
-use loom_revm_db::LoomInMemoryDB;
-
 use crate::db_reader::UniswapV3DBReader;
+use crate::virtual_impl::tick_provider::TickProviderLoomDB;
 use crate::UniswapV3Pool;
+use defi_entities::Pool;
+use loom_revm_db::LoomDBType;
 
 pub struct UniswapV3PoolVirtual;
 
@@ -84,7 +81,7 @@ pub struct Tick {
 }
 
 impl UniswapV3PoolVirtual {
-    pub fn simulate_swap_in_amount(db: &LoomInMemoryDB, pool: &UniswapV3Pool, token_in: Address, amount_in: U256) -> eyre::Result<U256> {
+    pub fn simulate_swap_in_amount(db: &LoomDBType, pool: &UniswapV3Pool, token_in: Address, amount_in: U256) -> eyre::Result<U256> {
         if amount_in.is_zero() {
             return Ok(U256::ZERO);
         }
@@ -101,7 +98,7 @@ impl UniswapV3PoolVirtual {
         let tick_spacing = pool.tick_spacing();
         let fee = pool.fee;
 
-        // Initialize a mutable state state struct to hold the dynamic simulated state of the pool
+        // Initialize a mutable state struct to hold the dynamic simulated state of the pool
         let mut current_state = CurrentState {
             sqrt_price_x_96: slot0.sqrtPriceX96.to(),              //Active price on the pool
             amount_calculated: I256::ZERO,                         //Amount of token_out that has been calculated
@@ -109,6 +106,8 @@ impl UniswapV3PoolVirtual {
             tick: slot0.tick.as_i32(),                             //Current i24 tick of the pool
             liquidity,                                             //Current available liquidity in the tick range
         };
+
+        let tick_provider = TickProviderLoomDB::new(db, pool_address);
 
         while current_state.amount_specified_remaining != I256::ZERO && current_state.sqrt_price_x_96 != sqrt_price_limit_x_96 {
             // Initialize a new step struct to hold the dynamic state of the pool at each step
@@ -118,16 +117,9 @@ impl UniswapV3PoolVirtual {
                 ..Default::default()
             };
 
-            let mut tick_bitmap: HashMap<i16, U256> = HashMap::new();
-            let (word_pos, _bit_pos) = position(current_state.tick / (tick_spacing as i32));
-
-            for i in word_pos - 1..=word_pos + 1 {
-                tick_bitmap.insert(i, UniswapV3DBReader::tick_bitmap(db, pool_address, i).unwrap_or_default());
-            }
-
             // Get the next tick from the current tick
             (step.tick_next, step.initialized) = uniswap_v3_math::tick_bitmap::next_initialized_tick_within_one_word(
-                &tick_bitmap,
+                &tick_provider,
                 current_state.tick,
                 tick_spacing as i32,
                 zero_for_one,
@@ -203,14 +195,14 @@ impl UniswapV3PoolVirtual {
 
         if current_state.amount_specified_remaining.is_zero() {
             let amount_out = (-current_state.amount_calculated).into_raw();
-            log::trace!("AmountOut : {amount_out}");
+            tracing::trace!("AmountOut : {amount_out}");
             Ok(amount_out)
         } else {
             Err(eyre!("NOT_ENOUGH_LIQUIDITY"))
         }
     }
 
-    pub fn simulate_swap_out_amount(db: &LoomInMemoryDB, pool: &UniswapV3Pool, token_in: Address, amount_out: U256) -> eyre::Result<U256> {
+    pub fn simulate_swap_out_amount(db: &LoomDBType, pool: &UniswapV3Pool, token_in: Address, amount_out: U256) -> eyre::Result<U256> {
         if amount_out.is_zero() {
             return Ok(U256::ZERO);
         }
@@ -227,7 +219,7 @@ impl UniswapV3PoolVirtual {
         let tick_spacing = pool.tick_spacing();
         let fee = pool.fee;
 
-        // Initialize a mutable state state struct to hold the dynamic simulated state of the pool
+        // Initialize a mutable state struct to hold the dynamic simulated state of the pool
         let mut current_state = CurrentState {
             sqrt_price_x_96: slot0.sqrtPriceX96.to(),                //Active price on the pool
             amount_calculated: I256::ZERO,                           //Amount of token_out that has been calculated
@@ -244,16 +236,11 @@ impl UniswapV3PoolVirtual {
                 ..Default::default()
             };
 
-            let mut tick_bitmap: HashMap<i16, U256> = HashMap::new();
-            let (word_pos, _bit_pos) = position(current_state.tick / (tick_spacing as i32));
-
-            for i in word_pos - 2..=word_pos + 2 {
-                tick_bitmap.insert(i, UniswapV3DBReader::tick_bitmap(db, pool_address, i).unwrap_or_default());
-            }
+            let tick_provider = TickProviderLoomDB::new(db, pool_address);
 
             // Get the next tick from the current tick
             (step.tick_next, step.initialized) = uniswap_v3_math::tick_bitmap::next_initialized_tick_within_one_word(
-                &tick_bitmap,
+                &tick_provider,
                 current_state.tick,
                 tick_spacing as i32,
                 zero_for_one,
@@ -329,7 +316,7 @@ impl UniswapV3PoolVirtual {
         if current_state.amount_specified_remaining.is_zero() {
             let amount_in = current_state.amount_calculated.into_raw();
 
-            log::trace!("Amount In : {amount_in}");
+            tracing::trace!("Amount In : {amount_in}");
 
             Ok(amount_in)
         } else {

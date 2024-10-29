@@ -12,7 +12,7 @@ use alloy_transport::Transport;
 use eyre::{eyre, OptionExt, Result};
 use k256::SecretKey;
 use lazy_static::lazy_static;
-use log::{debug, error, info};
+use tracing::{debug, error, info};
 
 use debug_provider::AnvilProviderExt;
 
@@ -82,7 +82,7 @@ impl MulticallerDeployer {
         let mut tx_request = TransactionRequest::default()
             .gas_limit(3_000_000)
             .transaction_type(2)
-            .max_fee_per_gas(next_base_fee)
+            .max_fee_per_gas(next_base_fee as u128)
             .max_priority_fee_per_gas(1)
             .input(TransactionInput::new(self.code.clone()))
             //.to(Address::ZERO)

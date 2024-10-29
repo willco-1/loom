@@ -18,11 +18,11 @@ use alloy::{
     },
 };
 use eyre::{eyre, Result};
-use log::{debug, error, trace};
 use reqwest::Client;
 use serde_json::value::RawValue;
 use tokio::sync::RwLock;
 use tower::Service;
+use tracing::{debug, error, trace};
 use url::Url;
 
 use crate::cachefolder::CacheFolder;
@@ -390,6 +390,7 @@ mod test {
     use std::env;
     use std::time::Duration;
 
+    use alloy::primitives::address;
     use alloy::{
         providers::{ext::DebugApi, Provider, ProviderBuilder},
         rpc::{
@@ -402,8 +403,8 @@ mod test {
     };
     use eyre::Result;
     use futures::StreamExt;
-    use log::debug;
     use tokio::select;
+    use tracing::debug;
     use url::Url;
 
     use crate::httpcached::HttpCachedTransport;
@@ -447,7 +448,7 @@ mod test {
 
         let mut blocks_watcher = provider.watch_blocks().await?.into_stream();
 
-        let weth = defi_abi::IWETH::new("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2".parse()?, provider.clone());
+        let weth = defi_abi::IWETH::new(address!("c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"), provider.clone());
 
         tokio::task::spawn(async move {
             loop {
@@ -468,7 +469,7 @@ mod test {
 
         let trace_opts = GethDebugTracingOptions::default()
             .with_tracer(GethDebugTracerType::BuiltInTracer(GethDebugBuiltInTracerType::PreStateTracer))
-            .with_prestate_config(PreStateConfig { diff_mode: Some(true) });
+            .with_prestate_config(PreStateConfig { diff_mode: Some(true), ..Default::default() });
 
         for i in 0..10 {
             debug!("Set next block: {}", i);

@@ -13,11 +13,11 @@ use alloy_rpc_types_trace::geth::GethDebugTracingCallOptions;
 use alloy_transport::Transport;
 use eyre::{eyre, Result};
 use lazy_static::lazy_static;
-use log::{debug, error, info, trace};
 use revm::primitives::{BlockEnv, Env, SHANGHAI};
 use revm::Evm;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::RwLock;
+use tracing::{debug, error, info, trace};
 
 use debug_provider::DebugProviderExt;
 use defi_blockchain::Blockchain;
@@ -26,7 +26,7 @@ use defi_events::{MarketEvents, MessageTxCompose, TxCompose, TxComposeData};
 use defi_types::{debug_trace_call_pre_state, GethStateUpdate, GethStateUpdateVec, TRACING_CALL_OPTS};
 use loom_actors::{subscribe, Accessor, Actor, ActorResult, Broadcaster, Consumer, Producer, SharedState, WorkerResult};
 use loom_actors_macros::{Accessor, Consumer, Producer};
-use loom_revm_db::LoomInMemoryDB;
+use loom_revm_db::LoomDBType;
 use loom_utils::evm::evm_transact;
 
 lazy_static! {
@@ -80,7 +80,11 @@ where
     let mut stuffing_state_locks: Vec<(Transaction, FetchState<GethStateUpdate>)> = Vec::new();
 
     let env = Env {
-        block: BlockEnv { number: U256::from(request.block), timestamp: U256::from(request.block_timestamp), ..BlockEnv::default() },
+        block: BlockEnv {
+            number: U256::from(request.next_block_number),
+            timestamp: U256::from(request.next_block_timestamp),
+            ..BlockEnv::default()
+        },
         ..Env::default()
     };
 
@@ -118,7 +122,7 @@ where
 
     let db_org = market_state.read().await.state_db.clone();
 
-    let rdb: Option<LoomInMemoryDB> = loop {
+    let rdb: Option<LoomDBType> = loop {
         counter += 1;
         if counter > 10 {
             break None;
@@ -192,7 +196,7 @@ where
             match swap_line.optimize_with_in_amount(&db, env.clone(), amount_in) {
                 Ok(_r) => {
                     let arc_db = Arc::new(db);
-                    let encode_request = MessageTxCompose::encode(TxComposeData {
+                    let encode_request = MessageTxCompose::route(TxComposeData {
                         stuffing_txs_hashes: tx_order.iter().map(|i| stuffing_states[*i].0.hash).collect(),
                         stuffing_txs: tx_order.iter().map(|i| stuffing_states[*i].0.clone()).collect(),
                         swap: Swap::BackrunSwapLine(swap_line.clone()),
@@ -241,7 +245,7 @@ async fn same_path_merger_worker<
 
     //let mut affecting_tx: HashMap<TxHash, bool> = HashMap::new();
     //let mut cur_base_fee: u128 = 0;
-    let mut cur_next_base_fee: u128 = 0;
+    let mut cur_next_base_fee: u64 = 0;
     let mut cur_block_number: Option<alloy_primitives::BlockNumber> = None;
     let mut cur_block_time: Option<u64> = None;
     let mut cur_state_override: StateOverride = StateOverride::default();

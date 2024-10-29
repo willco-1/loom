@@ -8,18 +8,15 @@ use alloy_primitives::{Address, Bytes, U256};
 use alloy_provider::Provider;
 use alloy_rpc_types_trace::geth::AccountState;
 use alloy_transport::Transport;
-use eyre::{eyre, Result};
-use log::{debug, error};
-
+use defi_address_book::TokenAddress;
 use defi_blockchain::Blockchain;
 use defi_entities::{AccountNonceAndBalanceState, MarketState, TxSigners};
-use defi_pools::protocols::UniswapV3Protocol;
 use defi_types::GethStateUpdate;
+use eyre::{eyre, Result};
 use loom_actors::{Accessor, Actor, ActorResult, SharedState, WorkerResult};
 use loom_actors_macros::Accessor;
-use loom_multicaller::SwapStepEncoder;
-use loom_utils::tokens::ETH_NATIVE_ADDRESS;
 use loom_utils::{BalanceCheater, NWETH};
+use tracing::{debug, error};
 
 async fn fetch_account_state<P, T, N>(client: P, address: Address) -> Result<AccountState>
 where
@@ -75,8 +72,6 @@ where
 {
     let mut market_state_guard = market_state.write().await;
 
-    market_state_guard.add_state(&UniswapV3Protocol::get_quoter_v3_state());
-
     let mut state: GethStateUpdate = BTreeMap::new();
 
     for address in copied_accounts_vec {
@@ -104,7 +99,7 @@ where
     }
 
     for (token, owner, balance) in token_balances_vec {
-        if token == ETH_NATIVE_ADDRESS {
+        if token == TokenAddress::ETH_NATIVE {
             match state.entry(owner) {
                 Entry::Vacant(e) => {
                     e.insert(AccountState { balance: Some(balance), nonce: Some(0), code: None, storage: BTreeMap::new() });
@@ -128,7 +123,7 @@ where
 
         set_monitor_token_balance(account_nonce_balance_state.clone(), owner, token, balance).await;
     }
-    market_state_guard.add_state(&state);
+    market_state_guard.state_db.apply_geth_update(state);
 
     Ok("DONE".to_string())
 }
@@ -144,7 +139,7 @@ pub struct MarketStatePreloadedOneShotActor<P, T, N> {
     #[accessor]
     market_state: Option<SharedState<MarketState>>,
     #[accessor]
-    account_nonce_balabnce_state: Option<SharedState<AccountNonceAndBalanceState>>,
+    account_nonce_balance_state: Option<SharedState<AccountNonceAndBalanceState>>,
     _t: PhantomData<T>,
     _n: PhantomData<N>,
 }
@@ -168,7 +163,7 @@ where
             new_accounts: Vec::new(),
             token_balances: Vec::new(),
             market_state: None,
-            account_nonce_balabnce_state: None,
+            account_nonce_balance_state: None,
             _t: PhantomData,
             _n: PhantomData,
         }
@@ -179,7 +174,7 @@ where
     }
 
     pub fn on_bc(self, bc: &Blockchain) -> Self {
-        Self { market_state: Some(bc.market_state()), account_nonce_balabnce_state: Some(bc.nonce_and_balance()), ..self }
+        Self { market_state: Some(bc.market_state()), account_nonce_balance_state: Some(bc.nonce_and_balance()), ..self }
     }
 
     pub fn with_signers(self, tx_signers: SharedState<TxSigners>) -> Self {
@@ -194,12 +189,6 @@ where
                 self
             }
         }
-    }
-
-    pub fn with_encoder(self, encoder: &SwapStepEncoder) -> Self {
-        let mut addresses = self.copied_accounts;
-        addresses.extend(vec![encoder.get_multicaller()]);
-        Self { copied_accounts: addresses, ..self }
     }
 
     pub fn with_copied_account(self, address: Address) -> Self {
@@ -241,7 +230,7 @@ where
             self.new_accounts.clone(),
             self.token_balances.clone(),
             self.market_state.clone().unwrap(),
-            self.account_nonce_balabnce_state.clone(),
+            self.account_nonce_balance_state.clone(),
         ));
 
         self.wait(Ok(vec![handler]))?;

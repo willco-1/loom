@@ -5,7 +5,7 @@ use alloy_primitives::TxHash;
 use alloy_provider::Provider;
 use alloy_transport::Transport;
 use futures::StreamExt;
-use log::error;
+use tracing::error;
 
 use defi_blockchain::Blockchain;
 use defi_events::{MessageMempoolDataUpdate, NodeMempoolDataUpdate};
@@ -13,6 +13,7 @@ use defi_types::MempoolTx;
 use loom_actors::{Actor, ActorResult, Broadcaster, Producer, WorkerResult};
 use loom_actors_macros::*;
 
+/// Worker listens for new transactions in the node mempool and broadcasts [`MessageMempoolDataUpdate`].
 pub async fn new_node_mempool_worker<P, T>(client: P, name: String, mempool_tx: Broadcaster<MessageMempoolDataUpdate>) -> WorkerResult
 where
     T: Transport + Clone,

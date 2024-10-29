@@ -8,10 +8,10 @@ use alloy_provider::Provider;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_transport::Transport;
 use eyre::{eyre, Result};
-use log::{debug, error, info};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use tracing::{debug, error, info};
 use url::Url;
 
 #[derive(Clone)]
@@ -195,7 +195,7 @@ where
         BundleTransaction: From<TX>,
     {
         let mut bundle = BundleRequest::new()
-            .set_block(U64::from(block_number + 1))
+            .set_target_block(U64::from(block_number + 1))
             .set_simulation_block(U64::from(block_number))
             .set_access_list_hashes(access_list_request);
 
@@ -206,11 +206,11 @@ where
         self.simulation_client.call_bundle(&bundle).await
     }
 
-    pub async fn broadcast_txes<TX>(&self, txs: Vec<TX>, block: u64) -> Result<()>
+    pub async fn broadcast_txes<TX>(&self, txs: Vec<TX>, target_block: u64) -> Result<()>
     where
         BundleTransaction: From<TX>,
     {
-        let mut bundle = BundleRequest::new().set_block(U64::from(block));
+        let mut bundle = BundleRequest::new().set_target_block(U64::from(target_block));
 
         for t in txs.into_iter() {
             bundle = bundle.push_transaction(t);
@@ -231,7 +231,7 @@ where
                 let bundle_result = client_clone.send_signed_body(body_clone, signature_clone).await;
                 match bundle_result {
                     Ok(_) => {
-                        info!("Flashbots bundle broadcast successfully {}", client_clone.name);
+                        debug!("Flashbots bundle broadcast successfully {}", client_clone.name);
                     }
                     Err(x) => {
                         error!("Broadcasting error to {} : {}", client_clone.name, x.to_string());
@@ -264,7 +264,7 @@ mod test {
 
         let tx = Bytes::from(vec![1, 1, 1, 1]);
 
-        let bundle_request = BundleRequest::new().set_block(U64::from(block)).push_transaction(tx);
+        let bundle_request = BundleRequest::new().set_target_block(U64::from(block)).push_transaction(tx);
 
         match flashbots_client.send_bundle(&bundle_request).await {
             Ok(resp) => {

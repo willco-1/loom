@@ -4,17 +4,44 @@ use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::sync::Arc;
 
+use crate::required_state::RequiredState;
 use alloy_primitives::{Address, Bytes, U256};
+use defi_address_book::FactoryAddress;
 use eyre::{eyre, ErrReport, Result};
+use loom_revm_db::LoomDBType;
 use revm::primitives::Env;
 use serde::{Deserialize, Serialize};
-use strum_macros::{Display, EnumString, VariantNames};
+use strum_macros::{Display, EnumIter, EnumString, VariantNames};
 
-use loom_revm_db::LoomInMemoryDB;
+pub fn get_protocol_by_factory(factory_address: Address) -> PoolProtocol {
+    if factory_address == FactoryAddress::UNISWAP_V2 {
+        PoolProtocol::UniswapV2
+    } else if factory_address == FactoryAddress::UNISWAP_V3 {
+        PoolProtocol::UniswapV3
+    } else if factory_address == FactoryAddress::PANCAKE_V3 {
+        PoolProtocol::PancakeV3
+    } else if factory_address == FactoryAddress::NOMISWAP {
+        PoolProtocol::NomiswapStable
+    } else if factory_address == FactoryAddress::SUSHISWAP_V2 {
+        PoolProtocol::Sushiswap
+    } else if factory_address == FactoryAddress::SUSHISWAP_V3 {
+        PoolProtocol::SushiswapV3
+    } else if factory_address == FactoryAddress::DOOARSWAP {
+        PoolProtocol::DooarSwap
+    } else if factory_address == FactoryAddress::SAFESWAP {
+        PoolProtocol::Safeswap
+    } else if factory_address == FactoryAddress::MINISWAP {
+        PoolProtocol::Miniswap
+    } else if factory_address == FactoryAddress::SHIBASWAP {
+        PoolProtocol::Shibaswap
+    } else if factory_address == FactoryAddress::MAVERICK {
+        PoolProtocol::Maverick
+    } else {
+        PoolProtocol::Unknown
+    }
+}
 
-use crate::required_state::RequiredState;
-
-#[derive(Copy, Clone, Debug, PartialEq, EnumString, VariantNames, Display, Default, Deserialize, Serialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Hash, Eq, EnumString, VariantNames, Display, Default, Deserialize, Serialize, EnumIter)]
 #[strum(ascii_case_insensitive, serialize_all = "lowercase")]
 pub enum PoolClass {
     #[default]
@@ -39,7 +66,9 @@ pub enum PoolClass {
     #[serde(rename = "rocketpool")]
     #[strum(serialize = "rocketpool")]
     RocketPool,
-    //NomiswapStable,
+    #[serde(rename = "custom")]
+    #[strum(serialize = "custom")]
+    Custom(u64),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,6 +80,7 @@ pub enum PoolProtocol {
     Sushiswap,
     SushiswapV3,
     DooarSwap,
+    OgPepe,
     Safeswap,
     Miniswap,
     Shibaswap,
@@ -63,6 +93,7 @@ pub enum PoolProtocol {
     LidoStEth,
     LidoWstEth,
     RocketEth,
+    Custom(u64),
 }
 
 impl Display for PoolProtocol {
@@ -78,6 +109,7 @@ impl Display for PoolProtocol {
             Self::Sushiswap => "Sushiswap",
             Self::SushiswapV3 => "SushiswapV3",
             Self::DooarSwap => "Dooarswap",
+            Self::OgPepe => "OgPepe",
             Self::Miniswap => "Miniswap",
             Self::Shibaswap => "Shibaswap",
             Self::Safeswap => "Safeswap",
@@ -87,59 +119,9 @@ impl Display for PoolProtocol {
             Self::LidoWstEth => "WstEth",
             Self::LidoStEth => "StEth",
             Self::RocketEth => "RocketEth",
+            Self::Custom(x) => "Custom",
         };
         write!(f, "{}", protocol_name)
-    }
-}
-
-#[derive(Clone)]
-pub struct EmptyPool {
-    address: Address,
-}
-
-impl EmptyPool {
-    pub fn new(address: Address) -> Self {
-        EmptyPool { address }
-    }
-}
-
-impl Pool for EmptyPool {
-    fn get_address(&self) -> Address {
-        self.address
-    }
-
-    fn calculate_out_amount(
-        &self,
-        _state: &LoomInMemoryDB,
-        _env: Env,
-        _token_address_from: &Address,
-        _token_address_to: &Address,
-        _in_amount: U256,
-    ) -> Result<(U256, u64), ErrReport> {
-        Err(eyre!("NOT_IMPLEMENTED"))
-    }
-
-    fn calculate_in_amount(
-        &self,
-        _state: &LoomInMemoryDB,
-        _env: Env,
-        _token_address_from: &Address,
-        _token_address_to: &Address,
-        _out_amount: U256,
-    ) -> Result<(U256, u64), ErrReport> {
-        Err(eyre!("NOT_IMPLEMENTED"))
-    }
-
-    fn can_flash_swap(&self) -> bool {
-        false
-    }
-
-    fn get_encoder(&self) -> &dyn AbiSwapEncoder {
-        &DefaultAbiSwapEncoder {}
-    }
-
-    fn get_state_required(&self) -> Result<RequiredState> {
-        Ok(RequiredState::new())
     }
 }
 
@@ -188,11 +170,6 @@ impl PartialEq for PoolWrapper {
 impl PoolWrapper {
     pub fn new(pool: Arc<dyn Pool>) -> Self {
         PoolWrapper { pool }
-    }
-
-    pub fn empty(pool_address: Address) -> Self {
-        let pool = EmptyPool::new(pool_address);
-        Self::new(Arc::new(pool))
     }
 }
 
@@ -243,7 +220,7 @@ pub trait Pool: Sync + Send {
 
     fn calculate_out_amount(
         &self,
-        state: &LoomInMemoryDB,
+        state: &LoomDBType,
         env: Env,
         token_address_from: &Address,
         token_address_to: &Address,
@@ -253,7 +230,7 @@ pub trait Pool: Sync + Send {
     // returns (in_amount, gas_used)
     fn calculate_in_amount(
         &self,
-        state: &LoomInMemoryDB,
+        state: &LoomDBType,
         env: Env,
         token_address_from: &Address,
         token_address_to: &Address,

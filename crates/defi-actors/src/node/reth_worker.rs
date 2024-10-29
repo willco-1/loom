@@ -5,32 +5,32 @@ use alloy_eips::BlockNumHash;
 use alloy_network::Ethereum;
 use alloy_primitives::{Address, BlockHash, B256};
 use alloy_provider::Provider;
-use alloy_rpc_types::{Block, BlockTransactions, Log};
+use alloy_rpc_types::{Block, BlockTransactions, Log, Transaction};
 use alloy_rpc_types_trace::geth::AccountState;
 use alloy_transport::Transport;
 use chrono::Utc;
 use futures::StreamExt;
-use log::{debug, error, info, trace};
 use reth_chainspec::ChainSpecBuilder;
 use reth_node_ethereum::EthereumNode;
 use reth_node_types::NodeTypesWithDBAdapter;
 use reth_primitives::{BlockHashOrNumber, BlockWithSenders};
 use reth_provider::providers::StaticFileProvider;
 use reth_provider::{AccountExtReader, BlockReader, ProviderFactory, ReceiptProvider, StateProvider, StorageReader, TransactionVariant};
+use tracing::{debug, error, info, trace};
 
-use defi_events::{BlockHeader, BlockLogs, BlockStateUpdate, MessageBlockHeader};
-use defi_types::ChainParameters;
+use defi_events::{
+    BlockHeader, BlockLogs, BlockStateUpdate, Message, MessageBlock, MessageBlockHeader, MessageBlockLogs, MessageBlockStateUpdate,
+};
 use loom_actors::{ActorResult, Broadcaster, WorkerResult};
 use loom_utils::reth_types::append_all_matching_block_logs;
 
 pub async fn reth_node_worker<P, T>(
     client: P,
-    chain_parameters: ChainParameters,
     db_path: String,
     new_block_headers_channel: Option<Broadcaster<MessageBlockHeader>>,
-    new_block_with_tx_channel: Option<Broadcaster<Block>>,
-    new_block_logs_channel: Option<Broadcaster<BlockLogs>>,
-    new_block_state_update_channel: Option<Broadcaster<BlockStateUpdate>>,
+    new_block_with_tx_channel: Option<Broadcaster<MessageBlock>>,
+    new_block_logs_channel: Option<Broadcaster<MessageBlockLogs>>,
+    new_block_state_update_channel: Option<Broadcaster<MessageBlockStateUpdate>>,
 ) -> WorkerResult
 where
     T: Transport + Clone,
@@ -84,7 +84,7 @@ where
                         }
 
                             if let Some(block_headers_channel) = &new_block_headers_channel {
-                                if let Err(e) = block_headers_channel.send(MessageBlockHeader::new_with_time(BlockHeader::new(chain_parameters.clone(), block.header.clone()))).await {
+                                if let Err(e) = block_headers_channel.send(MessageBlockHeader::new_with_time(BlockHeader::new( block.header.clone()))).await {
                                     error!("Block header broadcaster error {}", e);
                                 }
                             };
@@ -96,12 +96,12 @@ where
                                         block_with_senders.clone_from(&block_with_senders_reth);
 
                                         if let Some(block_with_senders_reth) = block_with_senders_reth {
-                                            debug!("block_with_senders_reth : txs {}", block_with_senders_reth.body.len());
+                                            debug!("block_with_senders_reth : txs {}", block_with_senders_reth.body.transactions.len());
 
                                             //convert RETH->RPCx
-                                            let block_with_senders_rpc = reth_rpc_types_compat::block::from_block_with_tx_hashes(block_with_senders_reth, block.header.total_difficulty.unwrap_or_default(), Some(block.header.hash));
+                                            let block_with_senders_rpc = reth_rpc_types_compat::block::from_block_with_tx_hashes::<Transaction>(block_with_senders_reth, block.header.total_difficulty.unwrap_or_default(), Some(block.header.hash));
 
-                                            let txs = BlockTransactions::Full(block_with_senders_rpc.transactions.clone().into_transactions().map(|t| t.inner).collect());
+                                            let txs = BlockTransactions::Full(block_with_senders_rpc.transactions.clone().into_transactions().collect());
                                             // remove OtherFields
                                             let block_with_senders_rpc : Block = Block{
                                                 transactions: txs,
@@ -112,7 +112,7 @@ where
                                             };
 
                                             //broadcast
-                                            match block_with_tx_channel.send(block_with_senders_rpc).await {
+                                            match block_with_tx_channel.send( Message::new_with_time(block_with_senders_rpc)).await {
                                                  Err(e) => {error!("Block header broadcaster error {}", e)}
                                                  _=>{
                                                     trace!("Block header sent");
@@ -143,11 +143,11 @@ where
                                                             trace!("logs {block_number} {block_hash} : {logs:?}");
 
                                                             let logs_update = BlockLogs {
-                                                                block_hash,
+                                                                block_header : block.header.clone(),
                                                                 logs
                                                             };
 
-                                                            match block_logs_channel.send(logs_update).await {
+                                                            match block_logs_channel.send(Message::new_with_time(  logs_update)).await {
                                                                  Err(e) => {error!("Block header broadcaster error {}", e)}
                                                                  _=>{
                                                                     trace!("Logs update sent")
@@ -219,12 +219,12 @@ where
 
 
                                 let state_update = BlockStateUpdate {
-                                    block_hash,
+                                    block_header : block.header.clone(),
                                     state_update: vec![account_btree],
                                 };
 
 
-                                match block_state_update_channel.send(state_update).await {
+                                match block_state_update_channel.send( Message::new_with_time(state_update)).await {
                                      Err(e) => {error!("Block header broadcaster error {}", e)}
                                      _=>{
                                         trace!("State update sent")
@@ -242,12 +242,11 @@ where
 
 pub fn reth_node_worker_starter<P, T>(
     client: P,
-    chain_parameters: ChainParameters,
     db_path: String,
     new_block_headers_channel: Option<Broadcaster<MessageBlockHeader>>,
-    new_block_with_tx_channel: Option<Broadcaster<Block>>,
-    new_block_logs_channel: Option<Broadcaster<BlockLogs>>,
-    new_block_state_update_channel: Option<Broadcaster<BlockStateUpdate>>,
+    new_block_with_tx_channel: Option<Broadcaster<MessageBlock>>,
+    new_block_logs_channel: Option<Broadcaster<MessageBlockLogs>>,
+    new_block_state_update_channel: Option<Broadcaster<MessageBlockStateUpdate>>,
 ) -> ActorResult
 where
     T: Transport + Clone,
@@ -255,7 +254,6 @@ where
 {
     let handler = tokio::task::spawn(reth_node_worker(
         client,
-        chain_parameters,
         db_path.clone(),
         new_block_headers_channel,
         new_block_with_tx_channel,

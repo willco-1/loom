@@ -3,15 +3,16 @@
 extern crate core;
 
 pub use account_nonce_balance::{AccountNonceAndBalanceState, AccountNonceAndBalances};
-pub use block_history::{BlockHistory, BlockHistoryEntry};
+pub use block_history::{apply_state_update, BlockHistory, BlockHistoryEntry, BlockHistoryManager};
 pub use datafetcher::{DataFetcher, FetchState};
 pub use keystore::KeyStore;
 pub use latest_block::LatestBlock;
 pub use market::Market;
 pub use market_state::MarketState;
-pub use pool::{AbiSwapEncoder, EmptyPool, Pool, PoolClass, PoolProtocol, PoolWrapper, PreswapRequirement};
+pub use pool::{get_protocol_by_factory, AbiSwapEncoder, Pool, PoolClass, PoolProtocol, PoolWrapper, PreswapRequirement};
 pub use signers::{TxSigner, TxSigners};
 pub use swap::Swap;
+pub use swap_encoder::SwapEncoder;
 pub use swapline::{SwapAmountType, SwapLine};
 pub use swappath::{SwapPath, SwapPaths};
 pub use swappath_builder::build_swap_path_vec;
@@ -38,5 +39,9 @@ mod keystore;
 
 pub mod private;
 
+pub mod config;
 mod datafetcher;
+mod mock_pool;
 mod swap;
+mod swap_encoder;
+pub mod tips;

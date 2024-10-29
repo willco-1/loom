@@ -4,19 +4,14 @@ use std::sync::Arc;
 
 use alloy_primitives::{Address, I256, U256};
 use eyre::{eyre, Result};
-use lazy_static::lazy_static;
-use log::debug;
 use revm::primitives::Env;
+use tracing::debug;
 
 use defi_types::SwapError;
-use loom_revm_db::LoomInMemoryDB;
+use loom_revm_db::LoomDBType;
 
 use crate::swappath::SwapPath;
 use crate::{PoolWrapper, SwapStep, Token};
-
-lazy_static! {
-    static ref WETH_ADDRESS: Address = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".parse().unwrap();
-}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum SwapAmountType {
@@ -45,15 +40,16 @@ impl SwapAmountType {
 
 #[derive(Clone, Debug, Default)]
 pub struct SwapLine {
-    //pub tokens: Vec<Token>,
-    //pub pools: Vec<PoolWrapper>,
     pub path: SwapPath,
+    /// Input token amount of the swap
     pub amount_in: SwapAmountType,
+    /// Output token amount of the swap
     pub amount_out: SwapAmountType,
+    /// The input amounts for each swap step
     pub amounts: Option<Vec<U256>>,
-    //pub min_balance: Option<U256>,
-    //pub tips: Option<U256>,
+    /// Output token of the swap
     pub swap_to: Option<Address>,
+    /// Gas used for the swap
     pub gas_used: Option<u64>,
 }
 
@@ -64,15 +60,11 @@ impl fmt::Display for SwapLine {
 
         let profit: String = if token_in == token_out {
             match token_in {
-                Some(t) => {
-                    format!("profit {}", t.to_float_sign(self.profit().unwrap_or(I256::ZERO)))
-                }
-                _ => {
-                    format!("profit {}", self.profit().unwrap_or(I256::ZERO))
-                }
+                Some(t) => format!("profit={}", t.to_float_sign(self.profit().unwrap_or(I256::ZERO))),
+                _ => format!("profit={}", self.profit().unwrap_or(I256::ZERO)),
             }
         } else {
-            "".to_string()
+            "no profit".to_string()
         };
 
         let tokens = self.tokens().iter().map(|token| token.get_symbol()).collect::<Vec<String>>().join(", ");
@@ -84,12 +76,8 @@ impl fmt::Display for SwapLine {
             .join(", ");
         let amount_in = match self.amount_in {
             SwapAmountType::Set(x) => match token_in {
-                Some(t) => {
-                    format!("{:?}", t.to_float(x))
-                }
-                _ => {
-                    format!("{}", x)
-                }
+                Some(t) => format!("{:?}", t.to_float(x)),
+                _ => format!("{}", x),
             },
             _ => {
                 format!("{:?}", self.amount_in)
@@ -97,17 +85,14 @@ impl fmt::Display for SwapLine {
         };
         let amount_out = match self.amount_out {
             SwapAmountType::Set(x) => match token_out {
-                Some(t) => {
-                    format!("{:?}", t.to_float(x))
-                }
-                _ => {
-                    format!("{}", x)
-                }
+                Some(t) => format!("{:?}", t.to_float(x)),
+                _ => format!("{}", x),
             },
             _ => {
                 format!("{:?}", self.amount_out)
             }
         };
+
         let amounts = self
             .amounts
             .as_ref()
@@ -116,29 +101,11 @@ impl fmt::Display for SwapLine {
 
         write!(
             f,
-            "SwapPath [{} tokens: [{}], pools: [{}], amount_in: {}, amount_out: {}, amounts: {} ]",
-            profit, tokens, pools, amount_in, amount_out, amounts
+            "SwapLine [{}, tokens=[{}], pools=[{}], amount_in={}, amount_out={}, amounts={}, gas_used={:?}]",
+            profit, tokens, pools, amount_in, amount_out, amounts, self.gas_used
         )
     }
 }
-
-/*
-impl Default for SwapLine {
-    fn default() -> Self {
-        SwapLine {
-            //tokens : Vec::new(),
-            //pools : Vec::new(),
-            path : Default::default(),
-            amount_in : SwapAmountType::NotSet,
-            amount_out : SwapAmountType::NotSet,
-            amounts : None,
-            swap_to : None,
-            gas_used : None,
-        }
-    }
-}
-
- */
 
 impl Hash for SwapLine {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -175,33 +142,42 @@ impl SwapLine {
         SwapLine::default()
     }
 
+    /// Check if the path contains a specific pool
     pub fn contains_pool(&self, pool: &PoolWrapper) -> bool {
         self.path.contains_pool(pool)
     }
 
+    /// Get all involved tokens in the swap line
     pub fn tokens(&self) -> &Vec<Arc<Token>> {
         &self.path.tokens
     }
 
+    /// Get all used pools in the swap line
     pub fn pools(&self) -> &Vec<PoolWrapper> {
         &self.path.pools
     }
 
+    /// Get the first token in the swap line
     pub fn get_first_token(&self) -> Option<&Arc<Token>> {
         self.tokens().first()
     }
 
+    /// Get the last token in the swap line
     pub fn get_last_token(&self) -> Option<&Arc<Token>> {
         self.tokens().last()
     }
 
+    /// Get the first pool in the swap line
     pub fn get_first_pool(&self) -> Option<&PoolWrapper> {
         self.pools().first()
     }
+
+    /// Get the last pool in the swap line
     pub fn get_last_pool(&self) -> Option<&PoolWrapper> {
         self.pools().last()
     }
 
+    /// Convert the swap line to two swap steps for flash swapping
     pub fn to_swap_steps(&self, multicaller: Address) -> Option<(SwapStep, SwapStep)> {
         let mut sp0: Option<SwapLine> = None;
         let mut sp1: Option<SwapLine> = None;
@@ -232,25 +208,7 @@ impl SwapLine {
         Some((step_0, step_1))
     }
 
-    pub fn get_token_in_address(&self) -> Option<Address> {
-        let tokens = self.tokens();
-        if tokens.is_empty() {
-            None
-        } else {
-            Some(tokens[0].get_address())
-        }
-    }
-
-    pub fn is_in_token_weth(&self) -> bool {
-        let tokens = self.tokens();
-
-        if tokens.is_empty() {
-            false
-        } else {
-            tokens[0].get_address() == *WETH_ADDRESS
-        }
-    }
-
+    /// Split the swap line into two swap lines at a specific pool index
     pub fn split(&self, pool_index: usize) -> Result<(SwapLine, SwapLine)> {
         let first = SwapLine {
             path: SwapPath::new(self.tokens()[0..pool_index + 1].to_vec(), self.pools()[0..pool_index].to_vec()),
@@ -271,6 +229,7 @@ impl SwapLine {
         Ok((first, second))
     }
 
+    /// Check if all pools in the swap line can be flash swapped
     pub fn can_flash_swap(&self) -> bool {
         for pool in self.pools().iter() {
             if !pool.can_flash_swap() {
@@ -280,46 +239,37 @@ impl SwapLine {
         true
     }
 
-    pub fn merge(&self, pool_index: usize) -> Result<(SwapLine, SwapLine)> {
-        let first = SwapLine {
-            path: SwapPath::new(self.tokens()[0..pool_index + 1].to_vec(), self.pools()[0..pool_index].to_vec()),
-            amount_in: self.amount_in,
-            amount_out: SwapAmountType::NotSet,
-            amounts: None,
-            swap_to: None,
-            gas_used: None,
-        };
-        let second = SwapLine {
-            path: SwapPath::new(self.tokens()[pool_index..].to_vec(), self.pools()[pool_index..].to_vec()),
-            amount_in: SwapAmountType::NotSet,
-            amount_out: self.amount_out,
-            amounts: None,
-            swap_to: None,
-            gas_used: None,
-        };
-        Ok((first, second))
-    }
-
+    /// Calculate the absolute profit of the swap line
     pub fn abs_profit(&self) -> U256 {
-        if let Some(token_in) = self.tokens().first() {
-            if let Some(token_out) = self.tokens().last() {
-                if token_in == token_out {
-                    if let SwapAmountType::Set(amount_in) = self.amount_in {
-                        if let SwapAmountType::Set(amount_out) = self.amount_out {
-                            if amount_out > amount_in {
-                                return amount_out - amount_in;
-                            }
-                        }
-                    }
-                }
-            }
+        let Some(token_in) = self.tokens().first() else {
+            return U256::ZERO;
+        };
+        let Some(token_out) = self.tokens().last() else {
+            return U256::ZERO;
+        };
+        if token_in != token_out {
+            return U256::ZERO;
         }
+        let SwapAmountType::Set(amount_in) = self.amount_in else {
+            return U256::ZERO;
+        };
+        let SwapAmountType::Set(amount_out) = self.amount_out else {
+            return U256::ZERO;
+        };
+        if amount_out > amount_in {
+            return amount_out - amount_in;
+        }
+
         U256::ZERO
     }
 
+    /// Calculate the absolute profit of the swap line in ETH
     pub fn abs_profit_eth(&self) -> U256 {
         let profit = self.abs_profit();
-        self.get_first_token().unwrap().calc_eth_value(profit).unwrap_or(U256::ZERO)
+        let Some(first_token) = self.get_first_token() else {
+            return U256::ZERO;
+        };
+        first_token.calc_eth_value(profit).unwrap_or(U256::ZERO)
     }
 
     pub fn profit(&self) -> Result<I256> {
@@ -343,7 +293,8 @@ impl SwapLine {
         Err(eyre!("CANNOT_CALCULATE"))
     }
 
-    pub fn calculate_with_in_amount(&self, state: &LoomInMemoryDB, env: Env, in_amount: U256) -> Result<(U256, u64), SwapError> {
+    /// Calculate the out amount for the swap line for a given in amount
+    pub fn calculate_with_in_amount(&self, state: &LoomDBType, env: Env, in_amount: U256) -> Result<(U256, u64), SwapError> {
         let mut out_amount = in_amount;
         let mut gas_used = 0;
         for (i, pool) in self.pools().iter().enumerate() {
@@ -380,7 +331,8 @@ impl SwapLine {
         Ok((out_amount, gas_used))
     }
 
-    pub fn calculate_with_out_amount(&self, state: &LoomInMemoryDB, env: Env, out_amount: U256) -> Result<(U256, u64), SwapError> {
+    /// Calculate the in amount for the swap line for a given out amount
+    pub fn calculate_with_out_amount(&self, state: &LoomDBType, env: Env, out_amount: U256) -> Result<(U256, u64), SwapError> {
         let mut in_amount = out_amount;
         let mut gas_used = 0;
         let mut pool_reverse = self.pools().clone();
@@ -423,11 +375,8 @@ impl SwapLine {
         Ok((in_amount, gas_used))
     }
 
-    fn calc_profit(in_amount: U256, out_amount: U256) -> I256 {
-        I256::from_raw(out_amount) - I256::from_raw(in_amount)
-    }
-
-    pub fn optimize_with_in_amount(&mut self, state: &LoomInMemoryDB, env: Env, in_amount: U256) -> Result<&mut Self, SwapError> {
+    /// Optimize the swap line for a given in amount
+    pub fn optimize_with_in_amount(&mut self, state: &LoomDBType, env: Env, in_amount: U256) -> Result<&mut Self, SwapError> {
         let mut current_in_amount = in_amount;
         let mut bestprofit: Option<I256> = None;
         let mut current_step = U256::from(10000);
@@ -447,16 +396,18 @@ impl SwapLine {
                 return Ok(self);
             }
 
-            let current_out_amount_result = self.calculate_with_in_amount(state, env.clone(), next_amount);
+            let (current_out_amount, current_gas_used) = match self.calculate_with_in_amount(state, env.clone(), next_amount) {
+                Ok(ret) => ret,
+                Err(e) => {
+                    if counter == 1 {
+                        // break if first swap already fails
+                        return Err(e);
+                    }
+                    (U256::ZERO, 0)
+                }
+            };
 
-            if counter == 1 && current_out_amount_result.is_err() {
-                return Err(current_out_amount_result.err().unwrap());
-            }
-            let (current_out_amount, current_gas_used) = current_out_amount_result.unwrap_or_default();
-
-            //let mut next_profit = I256::zero();
-
-            let current_profit = Self::calc_profit(next_amount, current_out_amount);
+            let current_profit = I256::from_raw(current_out_amount) - I256::from_raw(next_amount);
 
             if bestprofit.is_none() {
                 bestprofit = Some(current_profit);
@@ -514,5 +465,108 @@ impl SwapLine {
         }
 
         Ok(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mock_pool::MockPool;
+    use alloy_primitives::utils::parse_units;
+    use defi_address_book::{TokenAddress, UniswapV2PoolAddress, UniswapV3PoolAddress};
+    use std::sync::Arc;
+
+    fn default_swap_line() -> (MockPool, MockPool, SwapLine) {
+        let token0 = Arc::new(Token::new_with_data(TokenAddress::WETH, Some("WETH".to_string()), None, Some(18), true, false));
+        let token1 = Arc::new(Token::new_with_data(TokenAddress::USDT, Some("USDT".to_string()), None, Some(6), true, false));
+        let pool1 = MockPool { token0: TokenAddress::WETH, token1: TokenAddress::USDT, address: UniswapV3PoolAddress::WETH_USDT_3000 };
+        let pool2_address = Address::random();
+        let pool2 = MockPool { token0: TokenAddress::WETH, token1: TokenAddress::USDT, address: UniswapV2PoolAddress::WETH_USDT };
+
+        let swap_path =
+            SwapPath::new(vec![token0.clone(), token1.clone(), token1.clone(), token0.clone()], vec![pool1.clone(), pool2.clone()]);
+
+        let swap_line = SwapLine {
+            path: swap_path,
+            amount_in: SwapAmountType::Set(parse_units("0.01", "ether").unwrap().get_absolute()),
+            amount_out: SwapAmountType::Set(parse_units("0.03", "ether").unwrap().get_absolute()),
+            amounts: None,
+            swap_to: Some(Address::default()),
+            gas_used: Some(10000),
+        };
+
+        (pool1, pool2, swap_line)
+    }
+
+    #[test]
+    fn test_swapline_fmt() {
+        let (_, _, swap_line) = default_swap_line();
+
+        // under test
+        let formatted = format!("{}", swap_line);
+        assert_eq!(
+            formatted,
+            "SwapLine [profit=0.02, tokens=[WETH, USDT, USDT, WETH], \
+            pools=[UniswapV2@0x4e68ccd3e89f51c3074ca5072bbac773960dfa36, UniswapV2@0x0d4a11d5eeaac28ec3f61d100daf4d40471f1852], \
+            amount_in=0.01, amount_out=0.03, amounts=None, gas_used=Some(10000)]"
+        )
+    }
+
+    #[test]
+    fn test_contains_pool() {
+        let (pool1, pool2, swap_line) = default_swap_line();
+
+        assert!(swap_line.contains_pool(&PoolWrapper::from(pool1)));
+        assert!(swap_line.contains_pool(&PoolWrapper::from(pool2)));
+    }
+
+    #[test]
+    fn test_tokens() {
+        let (_, _, swap_line) = default_swap_line();
+
+        let tokens = swap_line.tokens();
+        assert_eq!(tokens.first().unwrap().get_address(), TokenAddress::WETH);
+        assert_eq!(tokens.get(1).unwrap().get_address(), TokenAddress::USDT);
+    }
+
+    #[test]
+    fn test_pools() {
+        let (pool1, pool2, swap_line) = default_swap_line();
+
+        let pools = swap_line.pools();
+        assert_eq!(pools.first().unwrap().get_address(), pool1.address);
+        assert_eq!(pools.get(1).unwrap().get_address(), pool2.address);
+    }
+
+    #[test]
+    fn test_get_first_token() {
+        let (_, _, swap_line) = default_swap_line();
+
+        let token = swap_line.get_first_token();
+        assert_eq!(token.unwrap().get_address(), TokenAddress::WETH);
+    }
+
+    #[test]
+    fn test_get_last_token() {
+        let (_, _, swap_line) = default_swap_line();
+
+        let token = swap_line.get_last_token();
+        assert_eq!(token.unwrap().get_address(), TokenAddress::WETH);
+    }
+
+    #[test]
+    fn test_get_first_pool() {
+        let (pool1, _, swap_line) = default_swap_line();
+
+        let pool = swap_line.get_first_pool();
+        assert_eq!(pool.unwrap().get_address(), pool1.address);
+    }
+
+    #[test]
+    fn test_get_last_pool() {
+        let (_, pool2, swap_line) = default_swap_line();
+
+        let pool = swap_line.get_last_pool();
+        assert_eq!(pool.unwrap().get_address(), pool2.address);
     }
 }

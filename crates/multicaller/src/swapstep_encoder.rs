@@ -1,14 +1,13 @@
 use alloy_primitives::{Address, Bytes, U256};
 use eyre::Result;
 use lazy_static::lazy_static;
-use log::{debug, trace};
-
-use defi_entities::{SwapAmountType, SwapStep};
-use defi_types::{MulticallerCall, MulticallerCalls};
+use tracing::{debug, trace};
 
 use crate::helpers::EncoderHelper;
 use crate::opcodes_encoder::{OpcodesEncoder, OpcodesEncoderV2};
 use crate::SwapLineEncoder;
+use defi_entities::{SwapAmountType, SwapStep};
+use defi_types::{MulticallerCall, MulticallerCalls};
 
 lazy_static! {
     static ref BALANCER_VAULT_ADDRESS: Address = "0xBA12222222228d8Ba445958a75a0704d566BF2C8".parse().unwrap();
@@ -25,7 +24,7 @@ impl SwapStepEncoder {
         Self { multicaller, swap_line_encoder: SwapLineEncoder::new(multicaller) }
     }
 
-    pub fn get_multicaller(&self) -> Address {
+    pub fn get_contract_address(&self) -> Address {
         self.multicaller
     }
 
@@ -42,9 +41,9 @@ impl SwapStepEncoder {
         token_address: Address,
         min_balance: U256,
         tips: U256,
-        to: Address,
+        funds_to: Address,
     ) -> Result<MulticallerCalls> {
-        self.swap_line_encoder.encode_tips(swap_opcodes, token_address, min_balance, tips, to)
+        self.swap_line_encoder.encode_tips(swap_opcodes, token_address, min_balance, tips, funds_to)
     }
 
     pub fn encode_balancer_flash_loan(&self, steps: Vec<SwapStep>) -> Result<MulticallerCalls> {
@@ -105,12 +104,14 @@ impl SwapStepEncoder {
         let mut swap_opcodes = MulticallerCalls::new();
 
         if swap.swap_line_vec().len() == 1 {
+            trace!("swap.swap_line_vec().len() == 1");
             swap_opcodes.merge(self.swap_line_encoder.encode_swap_line_in_amount(
                 swap.swap_line_vec().first().unwrap(),
                 flash_funds_to,
                 self.multicaller,
             )?);
         } else {
+            trace!("swap.swap_line_vec().len() != 1");
             for swap_path in swap.swap_line_vec().iter() {
                 let opcodes = self.swap_line_encoder.encode_swap_line_in_amount(swap_path, flash_funds_to, self.multicaller)?;
                 let call_bytes = OpcodesEncoderV2::pack_do_calls(&opcodes)?;
@@ -175,12 +176,15 @@ impl SwapStepEncoder {
         Ok((self.multicaller, call_data))
     }
 
-    pub fn encode(&self, sp0: &SwapStep, sp1: &SwapStep) -> Result<MulticallerCalls> {
+    pub fn encode_swap_steps(&self, sp0: &SwapStep, sp1: &SwapStep) -> Result<MulticallerCalls> {
         if sp0.can_flash_swap() {
+            trace!("encode_swap_steps -> sp0.can_flash_swap()");
             self.encode_in_amount(sp0.clone(), sp1.clone())
         } else if sp1.can_flash_swap() {
+            trace!("encode_swap_steps -> sp1.can_flash_swap()");
             self.encode_out_amount(sp0.clone(), sp1.clone())
         } else {
+            trace!("encode_swap_steps -> encode_balancer_flash_loan");
             self.encode_balancer_flash_loan(vec![sp0.clone(), sp1.clone()])
         }
     }

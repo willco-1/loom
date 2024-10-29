@@ -3,44 +3,52 @@ use std::fmt::{Display, Formatter};
 use std::process::exit;
 use std::time::Duration;
 
+use crate::flashbots_mock::mount_flashbots_mock;
+use crate::flashbots_mock::BundleRequest;
+use crate::test_config::TestConfig;
 use alloy_consensus::TxEnvelope;
-use alloy_primitives::{Address, BlockHash, TxHash, U256};
+use alloy_primitives::{address, TxHash, U256};
 use alloy_provider::network::eip2718::Encodable2718;
 use alloy_provider::Provider;
-use alloy_rpc_types::{Block, BlockId, BlockNumberOrTag, BlockTransactionsKind};
+use alloy_rpc_types::{BlockId, BlockNumberOrTag, BlockTransactionsKind};
 use clap::Parser;
-use env_logger::Env as EnvLog;
-use eyre::{OptionExt, Result};
-use log::{debug, error, info};
-
 use debug_provider::AnvilDebugProviderFactory;
 use defi_actors::{
-    fetch_and_add_pool_by_address, fetch_state_and_add_pool, AnvilBroadcastActor, ArbSwapPathMergerActor, BlockHistoryActor,
-    DiffPathMergerActor, EvmEstimatorActor, InitializeSignersOneShotActor, MarketStatePreloadedOneShotActor, NodeBlockActor,
-    NodeBlockActorConfig, NonceAndBalanceMonitorActor, PriceActor, SamePathMergerActor, StateChangeArbActor, SwapEncoderActor,
-    TxSignersActor,
+    fetch_and_add_pool_by_address, fetch_state_and_add_pool, AnvilBroadcastActor, ArbSwapPathMergerActor, BackrunConfig, BlockHistoryActor,
+    DiffPathMergerActor, EvmEstimatorActor, FlashbotsBroadcastActor, InitializeSignersOneShotBlockingActor,
+    MarketStatePreloadedOneShotActor, NodeBlockActor, NodeBlockActorConfig, NonceAndBalanceMonitorActor, PriceActor, SamePathMergerActor,
+    StateChangeArbActor, SwapRouterActor, TxSignersActor,
 };
+use defi_address_book::TokenAddress;
 use defi_entities::{AccountNonceAndBalanceState, BlockHistory, LatestBlock, Market, MarketState, PoolClass, Swap, Token, TxSigners};
-use loom_utils::NWETH;
-
 use defi_events::{
-    BlockLogs, BlockStateUpdate, MarketEvents, MempoolEvents, MessageBlockHeader, MessageHealthEvent, MessageTxCompose, TxCompose,
+    MarketEvents, MempoolEvents, MessageBlock, MessageBlockHeader, MessageBlockLogs, MessageBlockStateUpdate, MessageHealthEvent,
+    MessageTxCompose, TxCompose,
 };
 use defi_pools::protocols::CurveProtocol;
 use defi_pools::CurvePool;
 use defi_types::{debug_trace_block, ChainParameters, Mempool};
+use eyre::{OptionExt, Result};
+use flashbots::client::RelayConfig;
+use flashbots::Flashbots;
 use loom_actors::{Accessor, Actor, Broadcaster, Consumer, Producer, SharedState};
-use loom_multicaller::{MulticallerDeployer, SwapStepEncoder};
-use loom_revm_db::LoomInMemoryDB;
+use loom_multicaller::{MulticallerDeployer, MulticallerSwapEncoder};
+use loom_revm_db::LoomDBType;
+use loom_utils::evm::env_from_signed_tx;
+use loom_utils::NWETH;
+use revm::primitives::TxEnv;
+use tracing::{debug, error, info};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{fmt, EnvFilter, Layer};
+use wiremock::MockServer;
 
-use crate::test_config::TestConfig;
-
-mod default;
+mod flashbots_mock;
 mod test_config;
 
 #[derive(Clone, Default, Debug)]
 struct Stat {
-    encode_counter: usize,
+    found_counter: usize,
     sign_counter: usize,
     best_profit_eth: U256,
     best_swap: Option<Swap>,
@@ -53,8 +61,8 @@ impl Display for Stat {
                 Some(token) => {
                     write!(
                         f,
-                        "Encoded: {} Ok: {} Profit : {} / ProfitEth : {} Path : {} ",
-                        self.encode_counter,
+                        "Found: {} Ok: {} Profit : {} / ProfitEth : {} Path : {} ",
+                        self.found_counter,
                         self.sign_counter,
                         token.to_float(swap.abs_profit()),
                         NWETH::to_float(swap.abs_profit_eth()),
@@ -64,8 +72,8 @@ impl Display for Stat {
                 None => {
                     write!(
                         f,
-                        "Encoded: {} Ok: {} Profit : {} / ProfitEth : {} Path : {} ",
-                        self.encode_counter,
+                        "Found: {} Ok: {} Profit : {} / ProfitEth : {} Path : {} ",
+                        self.found_counter,
                         self.sign_counter,
                         swap.abs_profit(),
                         swap.abs_profit_eth(),
@@ -93,66 +101,84 @@ fn parse_tx_hashes(tx_hash_vec: Vec<&str>) -> Result<Vec<TxHash>> {
 struct Commands {
     #[arg(short, long)]
     config: String,
+
+    /// Timout in seconds after the test fails
+    #[arg(short, long, default_value = "10")]
+    timeout: u64,
+
+    /// Wait xx seconds before start re-broadcasting
+    #[arg(short, long, default_value = "1")]
+    wait_init: u64,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init_from_env(EnvLog::default().default_filter_or("debug,alloy_rpc_client=off"));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "debug,alloy_rpc_client=off,loom_multicaller=trace".into());
+    let fmt_layer = fmt::Layer::default().with_thread_ids(true).with_file(false).with_line_number(true).with_filter(env_filter);
+
+    tracing_subscriber::registry().with(fmt_layer).init();
 
     let args = Commands::parse();
-
-    let test_config = TestConfig::from_file(args.config).await?;
-
+    let test_config = TestConfig::from_file(args.config.clone()).await?;
     let node_url = env::var("MAINNET_WS")?;
-
     let client = AnvilDebugProviderFactory::from_node_on_block(node_url, test_config.settings.block).await?;
-
     let priv_key = client.privkey()?;
+
+    let mut mock_server: Option<MockServer> = None;
+    if test_config.modules.flashbots {
+        // Start flashbots mock server
+        mock_server = Some(MockServer::start().await);
+        mount_flashbots_mock(mock_server.as_ref().unwrap()).await;
+    }
 
     //let multicaller_address = MulticallerDeployer::new().deploy(client.clone(), priv_key.clone()).await?.address().ok_or_eyre("MULTICALLER_NOT_DEPLOYED")?;
     let multicaller_address = MulticallerDeployer::new()
-        .set_code(client.clone(), Address::repeat_byte(0x78))
+        .set_code(client.clone(), address!("FCfCfcfC0AC30164AFdaB927F441F2401161F358"))
         .await?
         .address()
         .ok_or_eyre("MULTICALLER_NOT_DEPLOYED")?;
     info!("Multicaller deployed at {:?}", multicaller_address);
 
-    let encoder = SwapStepEncoder::new(multicaller_address);
+    let encoder = MulticallerSwapEncoder::new(multicaller_address);
 
-    let block_nr = client.get_block_number().await?;
-    info!("Block : {}", block_nr);
+    let block_number = client.get_block_number().await?;
+    info!("Current block_number={}", block_number);
 
-    let block_header = client.get_block(block_nr.into(), BlockTransactionsKind::Hashes).await.unwrap().unwrap().header;
+    let block_header = client.get_block(block_number.into(), BlockTransactionsKind::Hashes).await?.unwrap().header;
+    info!("Current block_header={:?}", block_header);
 
-    let block_header_with_txes = client.get_block(block_nr.into(), BlockTransactionsKind::Full).await.unwrap().unwrap();
+    let block_header_with_txes = client.get_block(block_number.into(), BlockTransactionsKind::Full).await?.unwrap();
 
-    let cache_db = LoomInMemoryDB::default();
-
-    let market_instance = Market::default();
-
+    let cache_db = LoomDBType::default();
+    let mut market_instance = Market::default();
     let market_state_instance = MarketState::new(cache_db.clone());
+
+    // Add default tokens for price actor
+    let usdc_token = Token::new_with_data(TokenAddress::USDC, Some("USDC".to_string()), None, Some(6), true, false);
+    let usdt_token = Token::new_with_data(TokenAddress::USDT, Some("USDT".to_string()), None, Some(6), true, false);
+    let wbtc_token = Token::new_with_data(TokenAddress::WBTC, Some("WBTC".to_string()), None, Some(8), true, false);
+    let dai_token = Token::new_with_data(TokenAddress::DAI, Some("DAI".to_string()), None, Some(18), true, false);
+    market_instance.add_token(usdc_token)?;
+    market_instance.add_token(usdt_token)?;
+    market_instance.add_token(wbtc_token)?;
+    market_instance.add_token(dai_token)?;
 
     let mempool_instance = Mempool::new();
 
     info!("Creating channels");
     let new_block_headers_channel: Broadcaster<MessageBlockHeader> = Broadcaster::new(10);
-    let new_block_with_tx_channel: Broadcaster<Block> = Broadcaster::new(10);
-    let new_block_state_update_channel: Broadcaster<BlockStateUpdate> = Broadcaster::new(10);
-    let new_block_logs_channel: Broadcaster<BlockLogs> = Broadcaster::new(10);
-
-    //let new_mempool_tx_channel: Broadcaster<MessageMempoolDataUpdate> = Broadcaster::new(500);
+    let new_block_with_tx_channel: Broadcaster<MessageBlock> = Broadcaster::new(10);
+    let new_block_state_update_channel: Broadcaster<MessageBlockStateUpdate> = Broadcaster::new(10);
+    let new_block_logs_channel: Broadcaster<MessageBlockLogs> = Broadcaster::new(10);
 
     let market_events_channel: Broadcaster<MarketEvents> = Broadcaster::new(100);
     let mempool_events_channel: Broadcaster<MempoolEvents> = Broadcaster::new(500);
     let pool_health_monitor_channel: Broadcaster<MessageHealthEvent> = Broadcaster::new(100);
 
     let market_instance = SharedState::new(market_instance);
-
     let market_state = SharedState::new(market_state_instance);
-
     let mempool_instance = SharedState::new(mempool_instance);
-
-    let block_history_state = SharedState::new(BlockHistory::fetch(client.clone(), market_state.inner(), 10).await?);
+    let block_history_state = SharedState::new(BlockHistory::new(10));
 
     let tx_signers = TxSigners::new();
     let accounts_state = AccountNonceAndBalanceState::new();
@@ -160,16 +186,21 @@ async fn main() -> Result<()> {
     let tx_signers = SharedState::new(tx_signers);
     let accounts_state = SharedState::new(accounts_state);
 
-    let block_hash: BlockHash = block_header.hash;
+    let latest_block = SharedState::new(LatestBlock::new(block_number, block_header.hash));
 
-    let latest_block = SharedState::new(LatestBlock::new(block_nr, block_hash));
-
-    let (_, post) = debug_trace_block(client.clone(), BlockId::Number(BlockNumberOrTag::Number(block_nr)), true).await?;
-    latest_block.write().await.update(block_nr, block_hash, Some(block_header.clone()), Some(block_header_with_txes), None, Some(post));
+    let (_, post) = debug_trace_block(client.clone(), BlockId::Number(BlockNumberOrTag::Number(block_number)), true).await?;
+    latest_block.write().await.update(
+        block_number,
+        block_header.hash,
+        Some(block_header.clone()),
+        Some(block_header_with_txes),
+        None,
+        Some(post),
+    );
 
     info!("Starting initialize signers actor");
 
-    let mut initialize_signers_actor = InitializeSignersOneShotActor::new(Some(priv_key.to_bytes().to_vec()));
+    let mut initialize_signers_actor = InitializeSignersOneShotBlockingActor::new(Some(priv_key.to_bytes().to_vec()));
     match initialize_signers_actor.access(tx_signers.clone()).access(accounts_state.clone()).start_and_wait() {
         Err(e) => {
             error!("{}", e);
@@ -200,8 +231,9 @@ async fn main() -> Result<()> {
     }
 
     info!("Starting market state preload actor");
-    let mut market_state_preload_actor =
-        MarketStatePreloadedOneShotActor::new(client.clone()).with_encoder(&encoder).with_signers(tx_signers.clone());
+    let mut market_state_preload_actor = MarketStatePreloadedOneShotActor::new(client.clone())
+        .with_copied_account(encoder.get_contract_address())
+        .with_signers(tx_signers.clone());
     match market_state_preload_actor.access(market_state.clone()).start_and_wait() {
         Err(e) => {
             error!("{}", e)
@@ -210,8 +242,6 @@ async fn main() -> Result<()> {
             info!("Market state preload actor started successfully")
         }
     }
-
-    //load_pools(client.clone(), market_instance.clone(), market_state.clone()).await?;
 
     info!("Starting node actor");
     let mut node_block_actor = NodeBlockActor::new(client.clone(), NodeBlockActorConfig::all_enabled());
@@ -255,10 +285,10 @@ async fn main() -> Result<()> {
         _ => info!("Price actor has been initialized"),
     }
 
-    for (_pool_name, pool_config) in test_config.pools {
+    for (pool_name, pool_config) in test_config.pools {
         match pool_config.class {
             PoolClass::UniswapV2 | PoolClass::UniswapV3 => {
-                debug!("Loading uniswap pool");
+                debug!(address=%pool_config.address, class=%pool_config.class, "Loading pool");
                 fetch_and_add_pool_by_address(
                     client.clone(),
                     market_instance.clone(),
@@ -267,7 +297,7 @@ async fn main() -> Result<()> {
                     pool_config.class,
                 )
                 .await?;
-                debug!("Loaded uniswap pool ");
+                debug!(address=%pool_config.address, class=%pool_config.class, "Loaded pool");
             }
             PoolClass::Curve => {
                 debug!("Loading curve pool");
@@ -283,10 +313,15 @@ async fn main() -> Result<()> {
                 error!("Unknown pool class")
             }
         }
+        let swap_path_len = market_instance.read().await.get_pool_paths(&pool_config.address).unwrap_or_default().len();
+        info!(
+            "Loaded pool '{}' with address={}, pool_class={}, swap_paths={}",
+            pool_name, pool_config.address, pool_config.class, swap_path_len
+        );
     }
 
     info!("Starting block history actor");
-    let mut block_history_actor = BlockHistoryActor::new();
+    let mut block_history_actor = BlockHistoryActor::new(client.clone());
     match block_history_actor
         .access(latest_block.clone())
         .access(market_state.clone())
@@ -316,8 +351,8 @@ async fn main() -> Result<()> {
         }
     }
 
-    //let mut estimator_actor = HardhatEstimatorActor::new(client.clone(), encoder.clone());
-    let mut estimator_actor = EvmEstimatorActor::new(encoder.clone());
+    // Start estimator actor
+    let mut estimator_actor = EvmEstimatorActor::new_with_provider(encoder.clone(), Some(client.clone()));
     match estimator_actor.consume(tx_compose_channel.clone()).produce(tx_compose_channel.clone()).start() {
         Err(e) => error!("{e}"),
         _ => {
@@ -327,11 +362,11 @@ async fn main() -> Result<()> {
 
     // Start actor that encodes paths found
     if test_config.modules.encoder {
-        info!("Starting swap path encoder actor");
+        info!("Starting swap router actor");
 
-        let mut swap_path_encoder_actor = SwapEncoderActor::new(multicaller_address);
+        let mut swap_router_actor = SwapRouterActor::new();
 
-        match swap_path_encoder_actor
+        match swap_router_actor
             .access(tx_signers.clone())
             .access(accounts_state.clone())
             .consume(tx_compose_channel.clone())
@@ -342,7 +377,7 @@ async fn main() -> Result<()> {
                 error!("{}", e)
             }
             _ => {
-                info!("Swap path encoder actor started successfully")
+                info!("Swap router actor started successfully")
             }
         }
     }
@@ -360,11 +395,15 @@ async fn main() -> Result<()> {
         }
     }
 
-    //
+    // Start state change arb actor
     if test_config.modules.arb_block || test_config.modules.arb_mempool {
         info!("Starting state change arb actor");
-        let mut state_change_arb_actor =
-            StateChangeArbActor::new(client.clone(), test_config.modules.arb_block, test_config.modules.arb_mempool);
+        let mut state_change_arb_actor = StateChangeArbActor::new(
+            client.clone(),
+            test_config.modules.arb_block,
+            test_config.modules.arb_mempool,
+            BackrunConfig::new_dumb(),
+        );
         match state_change_arb_actor
             .access(mempool_instance.clone())
             .access(latest_block.clone())
@@ -425,6 +464,19 @@ async fn main() -> Result<()> {
             }
         }
     }
+    if test_config.modules.flashbots {
+        let relays = vec![RelayConfig { id: 1, url: mock_server.as_ref().unwrap().uri(), name: "relay".to_string(), no_sign: Some(false) }];
+        let flashbots = Flashbots::new(client.clone(), "https://unused", None).with_relays(relays);
+        let mut flashbots_broadcast_actor = FlashbotsBroadcastActor::new(flashbots, false, true);
+        match flashbots_broadcast_actor.consume(tx_compose_channel.clone()).start() {
+            Err(e) => {
+                error!("{}", e)
+            }
+            _ => {
+                info!("Flashbots broadcast actor started successfully")
+            }
+        }
+    }
 
     // Diff path merger tries to merge all found swaplines into one transaction s
     let mut diff_path_merger_actor = DiffPathMergerActor::new();
@@ -441,6 +493,10 @@ async fn main() -> Result<()> {
             info!("Diff path merger actor started successfully")
         }
     }
+
+    // #### Blockchain events
+    // we need to wait for all actors to start. For the CI it can be a bit longer
+    tokio::time::sleep(Duration::from_secs(args.wait_init)).await;
 
     let next_block_base_fee = ChainParameters::ethereum().calc_next_block_base_fee(
         block_header.gas_used,
@@ -469,113 +525,146 @@ async fn main() -> Result<()> {
         error!("{}", e);
     }
 
+    // #### RE-BROADCASTER
     //starting broadcasting transactions from eth to anvil
     let client_clone = client.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(1000)).await;
         info!("Re-broadcaster task started");
 
         for (_, tx_config) in test_config.txs.iter() {
             debug!("Fetching original tx {}", tx_config.hash);
-            match client_clone.get_transaction_by_hash(tx_config.hash).await {
-                Ok(tx_option) => match tx_option {
-                    Some(tx) => {
-                        let from = tx.from;
-                        let to = tx.to.unwrap_or_default();
-                        if let Ok(tx_env) = TryInto::<TxEnvelope>::try_into(tx.clone()) {
-                            match tx_config.send.to_lowercase().as_str() {
-                                "mempool" => {
-                                    let mut mempool_guard = mempool_instance.write().await;
-                                    let tx_hash: TxHash = tx.hash;
+            let Some(tx) = client_clone.get_transaction_by_hash(tx_config.hash).await.unwrap() else {
+                panic!("Cannot get tx: {}", tx_config.hash);
+            };
 
-                                    mempool_guard.add_tx(tx.clone());
-                                    if let Err(e) = mempool_events_channel.send(MempoolEvents::MempoolActualTxUpdate { tx_hash }).await {
-                                        error!("{e}");
-                                    }
-                                }
-                                "block" => match client_clone.send_raw_transaction(tx_env.encoded_2718().as_slice()).await {
-                                    Ok(p) => {
-                                        debug!("Transaction sent {}", p.tx_hash());
-                                    }
-                                    Err(e) => {
-                                        error!("Error sending transaction : {e}");
-                                    }
-                                },
-                                _ => {
-                                    debug!("Incorrect action {} for : hash {} from {} to {}  ", tx_config.send, tx_env.tx_hash(), from, to);
-                                }
-                            }
+            let from = tx.from;
+            let to = tx.to.unwrap_or_default();
+            if let Ok(tx_env) = TryInto::<TxEnvelope>::try_into(tx.clone()) {
+                match tx_config.send.to_lowercase().as_str() {
+                    "mempool" => {
+                        let mut mempool_guard = mempool_instance.write().await;
+                        let tx_hash: TxHash = tx.hash;
+
+                        mempool_guard.add_tx(tx.clone());
+                        if let Err(e) = mempool_events_channel.send(MempoolEvents::MempoolActualTxUpdate { tx_hash }).await {
+                            error!("{e}");
                         }
                     }
-                    None => {
-                        error!("Tx is none")
+                    "block" => match client_clone.send_raw_transaction(tx_env.encoded_2718().as_slice()).await {
+                        Ok(p) => {
+                            debug!("Transaction sent {}", p.tx_hash());
+                        }
+                        Err(e) => {
+                            error!("Error sending transaction : {e}");
+                        }
+                    },
+                    _ => {
+                        debug!("Incorrect action {} for : hash {} from {} to {}  ", tx_config.send, tx_env.tx_hash(), from, to);
                     }
-                },
-                Err(e) => {
-                    error!("Cannot get tx : {e}")
                 }
             }
         }
     });
 
-    println!("Test is started!");
+    println!("Test '{}' is started!", args.config);
 
-    let mut s = tx_compose_channel.subscribe().await;
+    let mut tx_compose_sub = tx_compose_channel.subscribe().await;
 
     let mut stat = Stat::default();
-    let timeout_duration = Duration::from_secs(5);
+    let timeout_duration = Duration::from_secs(args.timeout);
 
     loop {
         tokio::select! {
-            msg = s.recv() => {
+            msg = tx_compose_sub.recv() => {
                 match msg {
                     Ok(msg) => match msg.inner {
                         TxCompose::Sign(sign_message) => {
-                            debug!("Sign message. Swap : {}", sign_message.swap);
+                            debug!(swap=%sign_message.swap, "Sign message");
                             stat.sign_counter += 1;
+
                             if stat.best_profit_eth < sign_message.swap.abs_profit_eth() {
                                 stat.best_profit_eth = sign_message.swap.abs_profit_eth();
                                 stat.best_swap = Some(sign_message.swap.clone());
                             }
+
+                            if let Some(swaps_ok) = test_config.assertions.swaps_ok {
+                                if stat.sign_counter >= swaps_ok  {
+                                    break;
+                                }
+                            }
                         }
-                        TxCompose::Encode(encode_message) => {
-                            debug!("Encode message. Swap : {}", encode_message.swap);
-                            stat.encode_counter +=1;
+                        TxCompose::Route(encode_message) => {
+                            debug!(swap=%encode_message.swap, "Route message");
+                            stat.found_counter += 1;
                         }
                         _ => {}
                     },
-                    Err(e) => {
-                        error!("{e}")
+                    Err(error) => {
+                        error!(%error, "tx_compose_sub.recv")
                     }
                 }
             }
             msg = tokio::time::sleep(timeout_duration) => {
-                debug!("Timed out : {:?} ", msg);
+                debug!(?msg, "Timed out");
                 break;
             }
+        }
+    }
+    if test_config.modules.flashbots {
+        // wait for flashbots mock server to receive all requests
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        if let Some(last_requests) = mock_server.unwrap().received_requests().await {
+            if last_requests.is_empty() {
+                println!("Mock server did not received any request!")
+            } else {
+                println!("Received {} flashbots requests", last_requests.len());
+                for request in last_requests {
+                    let bundle_request: BundleRequest = serde_json::from_slice(&request.body)?;
+                    println!(
+                        "bundle_count={}, target_blocks={:?}, txs_in_bundles={:?}",
+                        bundle_request.params.len(),
+                        bundle_request.params.iter().map(|b| b.target_block).collect::<Vec<_>>(),
+                        bundle_request.params.iter().map(|b| b.transactions.len()).collect::<Vec<_>>()
+                    );
+                    // print all transactions
+                    for bundle in bundle_request.params {
+                        for tx in bundle.transactions {
+                            let mut tx_env = TxEnv::default();
+                            env_from_signed_tx(&mut tx_env, tx)?;
+                            println!("tx={:?}", tx_env);
+                        }
+                    }
+                }
+            }
+        } else {
+            println!("Mock server did not received any request!")
         }
     }
 
     println!("\n\n-------------------\nStat : {}\n-------------------\n", stat);
 
-    if let Some(results) = test_config.results {
-        if let Some(swaps_encoded) = results.swaps_encoded {
-            if swaps_encoded > stat.encode_counter {
-                error!("Test failed. Not enough encoded swaps : {} need {}", stat.encode_counter, swaps_encoded);
-                exit(1)
-            }
+    if let Some(swaps_encoded) = test_config.assertions.swaps_encoded {
+        if swaps_encoded > stat.found_counter {
+            println!("Test failed. Not enough encoded swaps : {} need {}", stat.found_counter, swaps_encoded);
+            exit(1)
+        } else {
+            println!("Test passed. Encoded swaps : {} required {}", stat.found_counter, swaps_encoded);
         }
-        if let Some(swaps_ok) = results.swaps_ok {
-            if swaps_ok > stat.sign_counter {
-                error!("Test failed. Not enough verified swaps : {} need {}", stat.sign_counter, swaps_ok);
-                exit(1)
-            }
+    }
+    if let Some(swaps_ok) = test_config.assertions.swaps_ok {
+        if swaps_ok > stat.sign_counter {
+            println!("Test failed. Not enough verified swaps : {} need {}", stat.sign_counter, swaps_ok);
+            exit(1)
+        } else {
+            println!("Test passed. swaps : {} required {}", stat.sign_counter, swaps_ok);
         }
-        if let Some(best_profit) = results.best_profit_eth {
-            if NWETH::from_float(best_profit) > stat.best_profit_eth {
-                error!("Profit is too small {} need {}", NWETH::to_float(stat.best_profit_eth), best_profit);
-                exit(1)
-            }
+    }
+    if let Some(best_profit) = test_config.assertions.best_profit_eth {
+        if NWETH::from_float(best_profit) > stat.best_profit_eth {
+            println!("Profit is too small {} need {}", NWETH::to_float(stat.best_profit_eth), best_profit);
+            exit(1)
+        } else {
+            println!("Test passed. best profit : {} > {}", NWETH::to_float(stat.best_profit_eth), best_profit);
         }
     }
 

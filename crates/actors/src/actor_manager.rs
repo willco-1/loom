@@ -1,6 +1,6 @@
 use eyre::Result;
-use log::{error, info};
 use tokio::task::JoinHandle;
+use tracing::{error, info};
 
 use crate::{Actor, WorkerResult};
 
@@ -53,7 +53,7 @@ impl ActorsManager {
                         info!("ActorWorker {_index} finished : {s}")
                     }
                     Err(e) => {
-                        error!("ActorWorker {_index} error : {e}")
+                        error!("ActorWorker {_index} finished with error : {e}")
                     }
                 },
                 Err(e) => {

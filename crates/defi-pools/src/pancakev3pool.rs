@@ -1,32 +1,25 @@
 use std::fmt::Debug;
 use std::ops::Sub;
 
+use crate::state_readers::UniswapV3StateReader;
 use alloy_primitives::aliases::{I24, U24};
 use alloy_primitives::{Address, Bytes, I256, U160, U256};
 use alloy_provider::{Network, Provider};
 use alloy_sol_types::{SolCall, SolInterface};
 use alloy_transport::Transport;
-use eyre::{eyre, ErrReport, OptionExt, Result};
-use lazy_static::lazy_static;
-use revm::primitives::Env;
-
 use defi_abi::pancake::IPancakeQuoterV2::IPancakeQuoterV2Calls;
 use defi_abi::pancake::IPancakeV3Pool::slot0Return;
 use defi_abi::pancake::{IPancakeQuoterV2, IPancakeV3Pool};
 use defi_abi::uniswap3::IUniswapV3Pool;
 use defi_abi::uniswap_periphery::ITickLens;
 use defi_abi::IERC20;
+use defi_address_book::PeripheryAddress;
 use defi_entities::required_state::RequiredState;
 use defi_entities::{AbiSwapEncoder, Pool, PoolClass, PoolProtocol, PreswapRequirement};
-use loom_revm_db::LoomInMemoryDB;
+use eyre::{eyre, ErrReport, OptionExt, Result};
+use loom_revm_db::LoomDBType;
 use loom_utils::evm::evm_call;
-
-use crate::state_readers::UniswapV3StateReader;
-
-lazy_static! {
-    pub static ref QUOTER_ADDRESS: Address = "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997".parse().unwrap();
-    pub static ref TICK_LENS_ADDRESS: Address = "0x9a489505a00cE272eAa5e07Dba6491314CaE3796".parse().unwrap();
-}
+use revm::primitives::Env;
 
 #[allow(dead_code)]
 #[derive(Clone, Debug, Default)]
@@ -128,7 +121,7 @@ impl PancakeV3Pool {
             PoolProtocol::UniswapV3Like
         }
     }
-    pub fn fetch_pool_data_evm(db: &LoomInMemoryDB, env: Env, address: Address) -> Result<Self> {
+    pub fn fetch_pool_data_evm(db: &LoomDBType, env: Env, address: Address) -> Result<Self> {
         let token0: Address = UniswapV3StateReader::token0(db, env.clone(), address)?;
         let token1: Address = UniswapV3StateReader::token1(db, env.clone(), address)?;
         let fee = UniswapV3StateReader::fee(db, env.clone(), address)?;
@@ -215,7 +208,7 @@ impl Pool for PancakeV3Pool {
 
     fn calculate_out_amount(
         &self,
-        state_db: &LoomInMemoryDB,
+        state_db: &LoomDBType,
         env: Env,
         token_address_from: &Address,
         token_address_to: &Address,
@@ -235,7 +228,7 @@ impl Pool for PancakeV3Pool {
         })
         .abi_encode();
 
-        let (value, gas_used) = evm_call(state_db, env, *QUOTER_ADDRESS, call_data)?;
+        let (value, gas_used) = evm_call(state_db, env, PeripheryAddress::PANCAKE_V3_QUOTER, call_data)?;
 
         let ret = IPancakeQuoterV2::quoteExactInputSingleCall::abi_decode_returns(&value, false)?;
 
@@ -248,7 +241,7 @@ impl Pool for PancakeV3Pool {
 
     fn calculate_in_amount(
         &self,
-        state_db: &LoomInMemoryDB,
+        state_db: &LoomDBType,
         env: Env,
         token_address_from: &Address,
         token_address_to: &Address,
@@ -268,7 +261,7 @@ impl Pool for PancakeV3Pool {
         })
         .abi_encode();
 
-        let (value, gas_used) = evm_call(state_db, env, *QUOTER_ADDRESS, call_data)?;
+        let (value, gas_used) = evm_call(state_db, env, PeripheryAddress::PANCAKE_V3_QUOTER, call_data)?;
 
         let ret = IPancakeQuoterV2::quoteExactOutputSingleCall::abi_decode_returns(&value, false)?;
 
@@ -328,7 +321,7 @@ impl Pool for PancakeV3Pool {
             .add_call(self.get_address(), IUniswapV3Pool::IUniswapV3PoolCalls::slot0(IUniswapV3Pool::slot0Call {}).abi_encode())
             .add_call(self.get_address(), IUniswapV3Pool::IUniswapV3PoolCalls::liquidity(IUniswapV3Pool::liquidityCall {}).abi_encode())
             .add_call(
-                *TICK_LENS_ADDRESS,
+                PeripheryAddress::PANCAKE_V3_TICK_LENS,
                 ITickLens::ITickLensCalls::getPopulatedTicksInWord(ITickLens::getPopulatedTicksInWordCall {
                     pool: pool_address,
                     tickBitmapIndex: tick_bitmap_index - 4,
@@ -336,7 +329,7 @@ impl Pool for PancakeV3Pool {
                 .abi_encode(),
             )
             .add_call(
-                *TICK_LENS_ADDRESS,
+                PeripheryAddress::PANCAKE_V3_TICK_LENS,
                 ITickLens::ITickLensCalls::getPopulatedTicksInWord(ITickLens::getPopulatedTicksInWordCall {
                     pool: pool_address,
                     tickBitmapIndex: tick_bitmap_index - 3,
@@ -344,7 +337,7 @@ impl Pool for PancakeV3Pool {
                 .abi_encode(),
             )
             .add_call(
-                *TICK_LENS_ADDRESS,
+                PeripheryAddress::PANCAKE_V3_TICK_LENS,
                 ITickLens::ITickLensCalls::getPopulatedTicksInWord(ITickLens::getPopulatedTicksInWordCall {
                     pool: pool_address,
                     tickBitmapIndex: tick_bitmap_index - 2,
@@ -352,7 +345,7 @@ impl Pool for PancakeV3Pool {
                 .abi_encode(),
             )
             .add_call(
-                *TICK_LENS_ADDRESS,
+                PeripheryAddress::PANCAKE_V3_TICK_LENS,
                 ITickLens::ITickLensCalls::getPopulatedTicksInWord(ITickLens::getPopulatedTicksInWordCall {
                     pool: pool_address,
                     tickBitmapIndex: tick_bitmap_index - 1,
@@ -360,7 +353,7 @@ impl Pool for PancakeV3Pool {
                 .abi_encode(),
             )
             .add_call(
-                *TICK_LENS_ADDRESS,
+                PeripheryAddress::PANCAKE_V3_TICK_LENS,
                 ITickLens::ITickLensCalls::getPopulatedTicksInWord(ITickLens::getPopulatedTicksInWordCall {
                     pool: pool_address,
                     tickBitmapIndex: tick_bitmap_index,
@@ -368,7 +361,7 @@ impl Pool for PancakeV3Pool {
                 .abi_encode(),
             )
             .add_call(
-                *TICK_LENS_ADDRESS,
+                PeripheryAddress::PANCAKE_V3_TICK_LENS,
                 ITickLens::ITickLensCalls::getPopulatedTicksInWord(ITickLens::getPopulatedTicksInWordCall {
                     pool: pool_address,
                     tickBitmapIndex: tick_bitmap_index + 1,
@@ -376,7 +369,7 @@ impl Pool for PancakeV3Pool {
                 .abi_encode(),
             )
             .add_call(
-                *TICK_LENS_ADDRESS,
+                PeripheryAddress::PANCAKE_V3_TICK_LENS,
                 ITickLens::ITickLensCalls::getPopulatedTicksInWord(ITickLens::getPopulatedTicksInWordCall {
                     pool: pool_address,
                     tickBitmapIndex: tick_bitmap_index + 2,
@@ -384,7 +377,7 @@ impl Pool for PancakeV3Pool {
                 .abi_encode(),
             )
             .add_call(
-                *TICK_LENS_ADDRESS,
+                PeripheryAddress::PANCAKE_V3_TICK_LENS,
                 ITickLens::ITickLensCalls::getPopulatedTicksInWord(ITickLens::getPopulatedTicksInWordCall {
                     pool: pool_address,
                     tickBitmapIndex: tick_bitmap_index + 3,
@@ -392,15 +385,15 @@ impl Pool for PancakeV3Pool {
                 .abi_encode(),
             )
             .add_call(
-                *TICK_LENS_ADDRESS,
+                PeripheryAddress::PANCAKE_V3_TICK_LENS,
                 ITickLens::ITickLensCalls::getPopulatedTicksInWord(ITickLens::getPopulatedTicksInWordCall {
                     pool: pool_address,
                     tickBitmapIndex: tick_bitmap_index + 4,
                 })
                 .abi_encode(),
             )
-            .add_call(*QUOTER_ADDRESS, quoter_swap_0_1_call)
-            .add_call(*QUOTER_ADDRESS, quoter_swap_1_0_call)
+            .add_call(PeripheryAddress::PANCAKE_V3_QUOTER, quoter_swap_0_1_call)
+            .add_call(PeripheryAddress::PANCAKE_V3_QUOTER, quoter_swap_1_0_call)
             .add_slot_range(self.get_address(), U256::from(0), 0x20)
             .add_empty_slot_range(self.get_address(), U256::from(0x10000), 0x20);
 
@@ -494,8 +487,8 @@ impl AbiSwapEncoder for PancakeV3AbiSwapEncoder {
 #[cfg(test)]
 mod tests {
     use env_logger::Env as EnvLog;
-    use log::debug;
     use std::env;
+    use tracing::debug;
 
     use debug_provider::AnvilDebugProviderFactory;
     use defi_entities::required_state::RequiredStateReader;
@@ -526,9 +519,9 @@ mod tests {
 
         let state_update = RequiredStateReader::fetch_calls_and_slots(client.clone(), state_required, None).await.unwrap();
 
-        let mut market_state = MarketState::new(LoomInMemoryDB::default());
+        let mut market_state = MarketState::new(LoomDBType::default());
 
-        market_state.add_state(&state_update);
+        market_state.state_db.apply_geth_update(state_update);
 
         let evm_env = Env::default();
 

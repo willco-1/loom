@@ -14,7 +14,7 @@ use alloy_rpc_types_trace::geth::{
 use alloy_transport::Transport;
 use eyre::Result;
 use lazy_static::lazy_static;
-use log::{debug, trace};
+use tracing::{debug, trace};
 
 use debug_provider::DebugProviderExt;
 
@@ -46,7 +46,7 @@ pub async fn debug_trace_block<T: Transport + Clone, N: Network, P: Provider<T, 
 ) -> eyre::Result<(GethStateUpdateVec, GethStateUpdateVec)> {
     let tracer_opts = GethDebugTracingOptions { config: GethDefaultTracingOptions::default(), ..GethDebugTracingOptions::default() }
         .with_tracer(BuiltInTracer(PreStateTracer))
-        .with_prestate_config(PreStateConfig { diff_mode: Some(diff_mode) });
+        .with_prestate_config(PreStateConfig { diff_mode: Some(diff_mode), disable_code: Some(false), disable_storage: Some(false) });
 
     let trace_result_vec = match block_id {
         BlockId::Number(block_number) => client.geth_debug_trace_block_by_number(block_number, tracer_opts).await?,
@@ -91,7 +91,7 @@ async fn debug_trace_call<T: Transport + Clone, N: Network, C: DebugProviderExt<
 ) -> Result<(GethStateUpdate, GethStateUpdate)> {
     let tracer_opts = GethDebugTracingOptions { config: GethDefaultTracingOptions::default(), ..GethDebugTracingOptions::default() }
         .with_tracer(BuiltInTracer(PreStateTracer))
-        .with_prestate_config(PreStateConfig { diff_mode: Some(diff_mode) });
+        .with_prestate_config(PreStateConfig { diff_mode: Some(diff_mode), disable_code: Some(false), disable_storage: Some(false) });
 
     let tracer_call_opts = GethDebugTracingCallOptions {
         tracing_options: tracer_opts.clone(),
@@ -166,7 +166,7 @@ pub async fn debug_trace_transaction<T: Transport + Clone, N: Network, P: Provid
 ) -> Result<(GethStateUpdate, GethStateUpdate)> {
     let tracer_opts = GethDebugTracingOptions { config: GethDefaultTracingOptions::default(), ..GethDebugTracingOptions::default() }
         .with_tracer(BuiltInTracer(PreStateTracer))
-        .with_prestate_config(PreStateConfig { diff_mode: Some(diff_mode) });
+        .with_prestate_config(PreStateConfig { diff_mode: Some(diff_mode), disable_code: Some(false), disable_storage: Some(false) });
 
     let trace_result = client.debug_trace_transaction(req, tracer_opts).await?;
     trace!("{:?}", trace_result);
@@ -182,15 +182,14 @@ pub async fn debug_trace_transaction<T: Transport + Clone, N: Network, P: Provid
 
 #[cfg(test)]
 mod test {
-    use std::collections::HashMap;
-
     use super::*;
+    use alloy_primitives::map::B256HashMap;
     use alloy_primitives::{B256, U256};
     use alloy_provider::ProviderBuilder;
     use alloy_rpc_client::{ClientBuilder, WsConnect};
     use alloy_rpc_types::state::{AccountOverride, StateOverride};
     use env_logger::Env as EnvLog;
-    use log::{debug, error};
+    use tracing::{debug, error};
 
     #[tokio::test]
     async fn test_debug_block() -> Result<()> {
@@ -214,10 +213,10 @@ mod test {
 
     #[test]
     fn test_encode_override() {
-        let mut state_override: StateOverride = StateOverride::new();
+        let mut state_override: StateOverride = StateOverride::default();
         let address = Address::default();
         let mut account_override: AccountOverride = AccountOverride::default();
-        let mut state_update_hashmap: HashMap<B256, B256> = HashMap::new();
+        let mut state_update_hashmap: B256HashMap<B256> = B256HashMap::default();
         state_update_hashmap.insert(B256::from(U256::from(1)), B256::from(U256::from(3)));
         account_override.state_diff = Some(state_update_hashmap);
 

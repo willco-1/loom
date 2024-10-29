@@ -9,11 +9,11 @@ use alloy_rpc_types::{BlockNumberOrTag, TransactionInput, TransactionRequest};
 use clap::Parser;
 use colored::*;
 use eyre::{OptionExt, Result};
-use log::{error, info};
 use revm::primitives::Env;
 use serde::{Deserialize, Serialize};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tracing::{error, info};
 
 use crate::cli::Cli;
 use crate::dto::SwapLineDTO;
@@ -21,11 +21,12 @@ use crate::preloader::preload_pools;
 use crate::soltest::create_sol_test;
 use debug_provider::AnvilDebugProviderFactory;
 use defi_actors::preload_market_state;
+use defi_address_book::UniswapV2PoolAddress;
 use defi_entities::{Market, MarketState, PoolWrapper, Swap, SwapAmountType, SwapLine};
 
 use loom_actors::SharedState;
-use loom_multicaller::{MulticallerDeployer, MulticallerSwapEncoder, SwapEncoder};
-use loom_revm_db::LoomInMemoryDB;
+use loom_multicaller::{MulticallerDeployer, MulticallerEncoder, MulticallerSwapEncoder};
+use loom_revm_db::LoomDBType;
 use loom_utils::{BalanceCheater, NWETH};
 
 mod cli;
@@ -48,7 +49,7 @@ async fn main() -> Result<()> {
 
     println!("Hello, block {block_number}!");
 
-    let node_url = env::var("MAINNET_WS").unwrap();
+    let node_url = env::var("MAINNET_WS")?;
 
     let client = AnvilDebugProviderFactory::from_node_on_block(node_url, BlockNumber::from(block_number)).await?;
 
@@ -66,7 +67,7 @@ async fn main() -> Result<()> {
     BalanceCheater::set_anvil_token_balance_float(client.clone(), NWETH::ADDRESS, multicaller_address, 1.0).await?;
 
     // Initialization
-    let cache_db = LoomInMemoryDB::default();
+    let cache_db = LoomDBType::default();
 
     let market_instance = Market::default();
 
@@ -87,7 +88,7 @@ async fn main() -> Result<()> {
     let market = market_instance.read().await;
 
     // Getting swap directions
-    let pool_address: Address = "0x0d4a11d5EEaaC28EC3F61d100daF4d40471f1852".parse()?;
+    let pool_address: Address = UniswapV2PoolAddress::WETH_USDT;
 
     let pool = market.get_pool(&pool_address).ok_or_eyre("POOL_NOT_FOUND")?;
 
@@ -145,7 +146,7 @@ async fn main() -> Result<()> {
         let gas_used = match client.estimate_gas(&tx_request).await {
             Ok(gas_needed) => {
                 //info!("Gas required:  {gas_needed}");
-                gas_needed as u64
+                gas_needed
             }
             Err(e) => {
                 error!("Gas estimation error : {e}");

@@ -1,7 +1,6 @@
 use alloy_primitives::{Address, BlockNumber, U256};
 use chrono::Local;
 use eyre::Result;
-use log::error;
 use rand::prelude::{Rng, SeedableRng, StdRng};
 use rayon::prelude::*;
 use rayon::{ThreadPool, ThreadPoolBuilder};
@@ -12,13 +11,14 @@ use std::ops::Deref;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
+use tracing::error;
 
 use debug_provider::AnvilDebugProviderFactory;
+use defi_address_book::UniswapV3PoolAddress;
 use defi_entities::required_state::RequiredStateReader;
 use defi_entities::{MarketState, Pool, PoolWrapper};
-use defi_pools::protocols::UniswapV3Protocol;
 use defi_pools::UniswapV3Pool;
-use loom_revm_db::LoomInMemoryDB;
+use loom_revm_db::LoomDBType;
 
 #[allow(dead_code)]
 async fn performance_test() {
@@ -54,9 +54,7 @@ async fn fetch_data_and_pool() -> Result<(MarketState, PoolWrapper)> {
 
     let mut market_state = MarketState::new(Default::default());
 
-    market_state.add_state(&UniswapV3Protocol::get_quoter_v3_state());
-
-    let pool_address: Address = "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640".parse().unwrap();
+    let pool_address: Address = UniswapV3PoolAddress::USDC_WETH_500;
     //let pool_address: Address = "0x5777d92f208679db4b9778590fa3cab3ac9e2168".parse().unwrap();
     let pool = UniswapV3Pool::fetch_pool_data(client.clone(), pool_address).await?;
 
@@ -68,13 +66,13 @@ async fn fetch_data_and_pool() -> Result<(MarketState, PoolWrapper)> {
 
     let state_required = RequiredStateReader::fetch_calls_and_slots(client.clone(), state_required, Some(block_number)).await?;
 
-    market_state.add_state(&state_required);
+    market_state.state_db.apply_geth_update(state_required);
 
     Ok((market_state, PoolWrapper::new(Arc::new(pool))))
 }
 
 #[allow(dead_code)]
-async fn sync_run(state_db: &LoomInMemoryDB, pool: UniswapV3Pool) {
+async fn sync_run(state_db: &LoomDBType, pool: UniswapV3Pool) {
     let evm_env = Env::default();
     let step = U256::from(U256::from(10).pow(U256::from(18)));
     let mut in_amount = U256::from(U256::from(10).pow(U256::from(18)));
@@ -87,7 +85,7 @@ async fn sync_run(state_db: &LoomInMemoryDB, pool: UniswapV3Pool) {
     });
 }
 
-async fn rayon_run(state_db: &LoomInMemoryDB, pool: PoolWrapper, threadpool: Arc<ThreadPool>) {
+async fn rayon_run(state_db: &LoomDBType, pool: PoolWrapper, threadpool: Arc<ThreadPool>) {
     let start_time = Local::now();
     let evm_env = Env::default();
     let step = U256::from(U256::from(10).pow(U256::from(16)));
@@ -137,7 +135,7 @@ async fn rayon_run(state_db: &LoomInMemoryDB, pool: PoolWrapper, threadpool: Arc
     assert_eq!(counter, ITER_COUNT, "NOT_ALL_RESULTS");
 }
 
-async fn rayon_parallel_run<'a>(state_db: &LoomInMemoryDB, pool: PoolWrapper) {
+async fn rayon_parallel_run<'a>(state_db: &LoomDBType, pool: PoolWrapper) {
     const TASKS_COUNT: u32 = 3;
     let mut tasks: Vec<JoinHandle<_>> = Vec::new();
 
@@ -167,7 +165,7 @@ async fn rayon_parallel_run<'a>(state_db: &LoomInMemoryDB, pool: PoolWrapper) {
     }
 }
 
-async fn tokio_run(state_db: &LoomInMemoryDB, pool: UniswapV3Pool) {
+async fn tokio_run(state_db: &LoomDBType, pool: UniswapV3Pool) {
     let evm_env = Env::default();
     let step = U256::from(U256::from(10).pow(U256::from(16)));
     let in_amount = U256::from(U256::from(10).pow(U256::from(18)));
@@ -175,7 +173,7 @@ async fn tokio_run(state_db: &LoomInMemoryDB, pool: UniswapV3Pool) {
     const ITER_COUNT: usize = 10000;
     const WORKERS_COUNT: usize = 10;
 
-    let (request_tx, request_rx) = tokio::sync::mpsc::channel::<Option<(Arc<LoomInMemoryDB>, Arc<Env>, U256)>>(ITER_COUNT);
+    let (request_tx, request_rx) = tokio::sync::mpsc::channel::<Option<(Arc<LoomDBType>, Arc<Env>, U256)>>(ITER_COUNT);
     let (result_tx, mut result_rx) = tokio::sync::mpsc::channel::<U256>(ITER_COUNT);
 
     let request_rx = Arc::new(RwLock::new(request_rx));
@@ -251,7 +249,7 @@ async fn tokio_run(state_db: &LoomInMemoryDB, pool: UniswapV3Pool) {
 }
 
 #[allow(dead_code)]
-async fn tokio_parallel_run(state_db: &LoomInMemoryDB, pool: UniswapV3Pool) {
+async fn tokio_parallel_run(state_db: &LoomDBType, pool: UniswapV3Pool) {
     const TASKS_COUNT: u32 = 3;
     let mut tasks: Vec<JoinHandle<_>> = Vec::new();
 

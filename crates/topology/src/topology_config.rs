@@ -36,6 +36,13 @@ pub enum TransportType {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+pub struct InfluxDbConfig {
+    pub url: String,
+    pub database: String,
+    pub tags: HashMap<String, String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
 pub struct ClientConfigParams {
     pub url: String,
     pub node: NodeType,
@@ -160,6 +167,7 @@ pub enum BroadcasterConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct EvmEstimatorConfig {
+    pub client: Option<String>,
     #[serde(rename = "bc")]
     pub blockchain: Option<String>,
     pub encoder: Option<String>,
@@ -193,6 +201,22 @@ pub struct PoolsConfig {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct WebserverConfig {
+    pub host: String,
+}
+
+impl Default for WebserverConfig {
+    fn default() -> Self {
+        WebserverConfig { host: "127.0.0.1:3333".to_string() }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DatabaseConfig {
+    pub url: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ActorConfig {
     pub broadcaster: Option<HashMap<String, BroadcasterConfig>>,
     pub node: Option<HashMap<String, BlockchainClientConfig>>,
@@ -206,12 +230,15 @@ pub struct ActorConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct TopologyConfig {
+    pub influxdb: Option<InfluxDbConfig>,
     pub clients: HashMap<String, ClientConfig>,
     pub blockchains: HashMap<String, BlockchainConfig>,
     pub actors: ActorConfig,
     pub signers: HashMap<String, SignersConfig>,
     pub encoders: HashMap<String, EncoderConfig>,
     pub preloaders: Option<HashMap<String, PreloaderConfig>>,
+    pub webserver: Option<WebserverConfig>,
+    pub database: Option<DatabaseConfig>,
 }
 
 impl TopologyConfig {

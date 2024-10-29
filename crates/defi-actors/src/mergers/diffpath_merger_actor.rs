@@ -4,9 +4,9 @@ use alloy_primitives::{Address, TxHash};
 use alloy_rpc_types::Transaction;
 use eyre::{OptionExt, Result};
 use lazy_static::lazy_static;
-use log::{debug, error, info};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::Receiver;
+use tracing::{debug, error, info};
 
 use defi_blockchain::Blockchain;
 use defi_entities::{MarketState, Swap};
@@ -84,7 +84,7 @@ async fn diff_path_merger_worker(
                                     let mut state = MarketState::new(sign_request.poststate.clone().unwrap().as_ref().clone());
 
                                     for dbs in merge_list.iter() {
-                                        state.apply_state_update( dbs.poststate_update.as_ref().ok_or_eyre("NO_STATE_UPDATE")?, false, false );
+                                        state.state_db.apply_geth_state_update( dbs.poststate_update.as_ref().ok_or_eyre("NO_STATE_UPDATE")?, false, false );
                                     }
                                     let arc_db = Arc::new(state.state_db);
 
@@ -102,7 +102,7 @@ async fn diff_path_merger_worker(
                                         }
                                     }
 
-                                    let encode_request = MessageTxCompose::encode(
+                                    let encode_request = MessageTxCompose::route(
                                         TxComposeData {
                                             stuffing_txs_hashes,
                                             stuffing_txs,
