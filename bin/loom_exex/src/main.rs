@@ -1,10 +1,14 @@
 use crate::arguments::{AppArgs, Command, LoomArgs};
+use alloy::eips::BlockId;
 use alloy::providers::{ProviderBuilder, WsConnect};
 use alloy::rpc::client::ClientBuilder;
 use clap::{CommandFactory, FromArgMatches, Parser};
-use defi_actors::{mempool_worker, NodeBlockActorConfig};
-use defi_blockchain::Blockchain;
-use loom_topology::TopologyConfig;
+use loom::core::blockchain::Blockchain;
+use loom::core::topology::TopologyConfig;
+use loom::evm::db::{AlloyDB, LoomDB};
+use loom::node::actor_config::NodeBlockActorConfig;
+use loom::node::exex::mempool_worker;
+use loom::types::entities::MarketState;
 use reth::builder::engine_tree_config::TreeConfig;
 use reth::builder::EngineNodeLauncher;
 use reth::chainspec::{Chain, EthereumChainSpecParser};
@@ -20,7 +24,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{fmt, EnvFilter, Layer};
 
 mod arguments;
-mod loom;
+mod loom_runtime;
 
 fn main() -> eyre::Result<()> {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
@@ -43,7 +47,7 @@ fn main() -> eyre::Result<()> {
                 .with_types_and_provider::<EthereumNode, BlockchainProvider2<_>>()
                 .with_components(EthereumNode::components())
                 .with_add_ons(EthereumAddOns::default())
-                .install_exex("loom-exex", |node_ctx| loom::init(node_ctx, bc_clone, NodeBlockActorConfig::all_enabled()))
+                .install_exex("loom-exex", |node_ctx| loom_runtime::init(node_ctx, bc_clone, NodeBlockActorConfig::all_enabled()))
                 .launch_with_fn(|builder| {
                     let launcher = EngineNodeLauncher::new(builder.task_executor().clone(), builder.config().datadir(), engine_tree_config);
                     builder.launch_with(launcher)
@@ -52,9 +56,14 @@ fn main() -> eyre::Result<()> {
 
             let mempool = handle.node.pool.clone();
             let ipc_provider = ProviderBuilder::new().on_builtin(handle.node.config.rpc.ipcpath.as_str()).await?;
+            let alloy_db = AlloyDB::new(ipc_provider.clone(), BlockId::latest()).unwrap();
+
+            let state_db = LoomDB::new().with_ext_db(alloy_db);
+            let bc = bc.with_market_state(MarketState::new(state_db));
             let bc_clone = bc.clone();
             tokio::task::spawn(async move {
-                if let Err(e) = loom::start_loom(ipc_provider, bc_clone, topology_config, loom_args.loom_config.clone(), true).await {
+                if let Err(e) = loom_runtime::start_loom(ipc_provider, bc_clone, topology_config, loom_args.loom_config.clone(), true).await
+                {
                     error!("Error starting loom: {:?}", e);
                 }
             });
@@ -73,10 +82,10 @@ fn main() -> eyre::Result<()> {
                 let transport = WsConnect { url: client_config.url(), auth: None, config: None };
                 let client = ClientBuilder::default().ws(transport).await?;
                 let provider = ProviderBuilder::new().on_client(client).boxed();
-                let bc = Blockchain::new(Chain::mainnet().id());
+                let bc = Blockchain::<LoomDB>::new(Chain::mainnet().id());
                 let bc_clone = bc.clone();
 
-                if let Err(e) = loom::start_loom(provider, bc_clone, topology_config, loom_args.loom_config.clone(), false).await {
+                if let Err(e) = loom_runtime::start_loom(provider, bc_clone, topology_config, loom_args.loom_config.clone(), false).await {
                     error!("Error starting loom: {:#?}", e);
                     panic!("{}", e)
                 }

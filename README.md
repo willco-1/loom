@@ -2,8 +2,8 @@
 
 <div align="center">
 
-[![CI status](https://github.com/dexloom/loom/workflows/Loom/badge.svg)][gh-loom]
-[![Book status](https://github.com/dexloom/loom/workflows/Book/badge.svg)][gh-book]
+[![CI status](https://github.com/dexloom/loom/actions/workflows/ci.yml/badge.svg?branch=main)][gh-loom]
+[![Book status](https://github.com/dexloom/loom/actions/workflows/book.yml/badge.svg?branch=main)][gh-book]
 [![Telegram Chat][tg-badge]][tg-url]
 
 | [User Book](https://dexloom.github.io/loom/)
@@ -29,26 +29,25 @@ First of all, Loom will not generate any revenue and is challenging for newcomer
 
 ## How to get started?
 
-See the [Getting started](https://dexloom.github.io/loom/getting_started.html) guide.
+See the [Getting started](https://dexloom.github.io/loom/getting_started.html) guide. Have also a look at the [Multicaller](https://github.com/dexloom/multicaller) smart contract repository.
 
 
 ## Crates
 
-- [actors](./crates/actors) - actors implementation
-- [actors-macros](./crates/actors-macros) - macros for actors
-- [debug-provider](./crates/debug-provider) - debug api provider for node + anvil, HttpCachedTransport
-- [defi-abi](./crates/defi-abi) - sol! wrapper for contracts interface
-- [defi-actors](./crates/defi-actors) - defi actors crate
-- [defi-blockchain](./crates/defi-blockchain) - loom configuration module
-- [defi-entities](./crates/defi-entities) - defi entities crate
-- [defi-events](./crates/defi-events) - defi events crate
-- [defi-pools](./crates/defi-pools) - defi exchange pools implementation
-- [flashbots](./crates/flashbots) - flashbots client
-- [loom-revm-db](./crates/loom-revm-db) - optimized InMemoryDB
-- [multicaller](./crates/multicaller) - multicaller interaction crate
-- [topology](./crates/topology) - topology crate
-- [types](./crates/types) - defi types crate
-- [utils](./crates/utils) - various helpers
+- [actors](crates/core/actors) - actors implementation
+- [actors-macros](crates/core/actors-macros) - macros for actors
+- [debug-provider](crates/node/debug-provider) - debug api provider for node + anvil, HttpCachedTransport
+- [defi-abi](crates/defi/abi) - sol! wrapper for contracts interface
+- [defi-blockchain](crates/core/blockchain) - loom configuration module
+- [defi-entities](crates/types/entities) - defi entities crate
+- [defi-events](crates/types/events) - defi events crate
+- [defi-pools](crates/defi/pools) - defi exchange pools implementation
+- [flashbots](crates/broadcast/flashbots) - flashbots client
+- [loom-revm-db](crates/evm/db) - optimized InMemoryDB
+- [multicaller](crates/execution/multicaller) - multicaller interaction crate
+- [topology](crates/core/topology) - topology crate
+- [types](crates/types/blockchain) - blockchain types crate
+- [utils](crates/evm/utils) - various helpers
 
 ## Bins
 

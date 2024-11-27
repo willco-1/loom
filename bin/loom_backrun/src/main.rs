@@ -2,15 +2,16 @@ use alloy_provider::Provider;
 use eyre::Result;
 use tracing::{error, info};
 
-use defi_actors::{
-    ArbSwapPathMergerActor, BackrunConfig, BackrunConfigSection, DiffPathMergerActor, SamePathMergerActor, StateChangeArbActor,
-    StateHealthMonitorActor, StuffingTxMonitorActor, SwapRouterActor,
-};
-use defi_entities::config::load_from_file;
-use defi_events::MarketEvents;
-use loom_actors::{Accessor, Actor, Consumer, Producer};
-use loom_metrics::{BlockLatencyRecorderActor, InfluxDbWriterActor};
-use loom_topology::{Topology, TopologyConfig};
+use loom::core::actors::{Accessor, Actor, Consumer, Producer};
+use loom::core::router::SwapRouterActor;
+use loom::core::topology::{Topology, TopologyConfig};
+use loom::defi::health_monitor::{StateHealthMonitorActor, StuffingTxMonitorActor};
+use loom::evm::db::LoomDBType;
+use loom::metrics::{BlockLatencyRecorderActor, InfluxDbWriterActor};
+use loom::strategy::backrun::{BackrunConfig, BackrunConfigSection, StateChangeArbActor};
+use loom::strategy::merger::{ArbSwapPathMergerActor, DiffPathMergerActor, SamePathMergerActor};
+use loom::types::entities::config::load_from_file;
+use loom::types::events::MarketEvents;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -22,7 +23,7 @@ async fn main() -> Result<()> {
 
     let topology_config = TopologyConfig::load_from_file("config.toml".to_string())?;
     let influxdb_config = topology_config.influxdb.clone();
-    let (topology, mut worker_task_vec) = Topology::from(topology_config).await?;
+    let (topology, mut worker_task_vec) = Topology::<LoomDBType>::from(topology_config).await?;
 
     let client = topology.get_client(Some("local".to_string()).as_ref())?;
     let blockchain = topology.get_blockchain(Some("mainnet".to_string()).as_ref())?;

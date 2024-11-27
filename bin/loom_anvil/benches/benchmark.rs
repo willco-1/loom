@@ -1,5 +1,7 @@
 use alloy_primitives::{Address, BlockNumber, U256};
 use chrono::Local;
+#[allow(unused_imports)]
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use eyre::Result;
 use rand::prelude::{Rng, SeedableRng, StdRng};
 use rayon::prelude::*;
@@ -9,16 +11,17 @@ use std::collections::HashMap;
 use std::env;
 use std::ops::Deref;
 use std::sync::Arc;
+#[allow(unused_imports)]
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tracing::error;
 
-use debug_provider::AnvilDebugProviderFactory;
-use defi_address_book::UniswapV3PoolAddress;
-use defi_entities::required_state::RequiredStateReader;
-use defi_entities::{MarketState, Pool, PoolWrapper};
-use defi_pools::UniswapV3Pool;
-use loom_revm_db::LoomDBType;
+use loom::defi::address_book::UniswapV3PoolAddress;
+use loom::defi::pools::UniswapV3Pool;
+use loom::evm::db::{LoomDB, LoomDBType};
+use loom::node::debug_provider::AnvilDebugProviderFactory;
+use loom::types::entities::required_state::RequiredStateReader;
+use loom::types::entities::{MarketState, Pool, PoolWrapper};
 
 #[allow(dead_code)]
 async fn performance_test() {
@@ -45,14 +48,14 @@ async fn performance_test() {
     values.sort_unstable();
 }
 
-async fn fetch_data_and_pool() -> Result<(MarketState, PoolWrapper)> {
+async fn fetch_data_and_pool() -> Result<(MarketState<LoomDB>, PoolWrapper)> {
     let block_number: BlockNumber = 19948348;
 
     let node_url = env::var("MAINNET_WS")?;
 
     let client = AnvilDebugProviderFactory::from_node_on_block(node_url, block_number).await?;
 
-    let mut market_state = MarketState::new(Default::default());
+    let mut market_state = MarketState::<LoomDB>::new(Default::default());
 
     let pool_address: Address = UniswapV3PoolAddress::USDC_WETH_500;
     //let pool_address: Address = "0x5777d92f208679db4b9778590fa3cab3ac9e2168".parse().unwrap();
@@ -125,7 +128,7 @@ async fn rayon_run(state_db: &LoomDBType, pool: PoolWrapper, threadpool: Arc<Thr
 
     let mut counter: usize = 0;
 
-    if result_rx.recv().await.is_some() {
+    while result_rx.recv().await.is_some() {
         counter += 1;
     }
 
@@ -277,7 +280,7 @@ async fn tokio_parallel_run(state_db: &LoomDBType, pool: UniswapV3Pool) {
 #[cfg(not(test))]
 fn benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("pool speed");
-    group.measurement_time(Duration::from_secs(60));
+    group.measurement_time(std::time::Duration::from_secs(60));
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
 
@@ -316,6 +319,8 @@ async fn main() {
 
 #[cfg(test)]
 mod test {
+    #[allow(unused_imports)]
+    use crate::{fetch_data_and_pool, rayon_parallel_run};
 
     #[test]
     fn test_run() {

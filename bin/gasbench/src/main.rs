@@ -1,9 +1,5 @@
-use std::collections::{BTreeMap, HashMap};
-use std::env;
-use std::sync::Arc;
-
-use alloy::primitives::{Address, BlockNumber, U256};
-use alloy_primitives::Bytes;
+use alloy_network::primitives::BlockTransactionsKind;
+use alloy_primitives::{Address, BlockNumber, Bytes, U256};
 use alloy_provider::Provider;
 use alloy_rpc_types::{BlockNumberOrTag, TransactionInput, TransactionRequest};
 use clap::Parser;
@@ -11,6 +7,9 @@ use colored::*;
 use eyre::{OptionExt, Result};
 use revm::primitives::Env;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap};
+use std::env;
+use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{error, info};
@@ -19,15 +18,16 @@ use crate::cli::Cli;
 use crate::dto::SwapLineDTO;
 use crate::preloader::preload_pools;
 use crate::soltest::create_sol_test;
-use debug_provider::AnvilDebugProviderFactory;
-use defi_actors::preload_market_state;
-use defi_address_book::UniswapV2PoolAddress;
-use defi_entities::{Market, MarketState, PoolWrapper, Swap, SwapAmountType, SwapLine};
+use loom_node_debug_provider::AnvilDebugProviderFactory;
 
-use loom_actors::SharedState;
-use loom_multicaller::{MulticallerDeployer, MulticallerEncoder, MulticallerSwapEncoder};
-use loom_revm_db::LoomDBType;
-use loom_utils::{BalanceCheater, NWETH};
+use loom_defi_address_book::UniswapV2PoolAddress;
+use loom_types_entities::{Market, MarketState, PoolWrapper, Swap, SwapAmountType, SwapLine};
+
+use loom_core_actors::SharedState;
+use loom_defi_preloader::preload_market_state;
+use loom_evm_db::LoomDBType;
+use loom_evm_utils::{BalanceCheater, NWETH};
+use loom_execution_multicaller::{MulticallerDeployer, MulticallerEncoder, MulticallerSwapEncoder};
 
 mod cli;
 mod dto;
@@ -53,7 +53,8 @@ async fn main() -> Result<()> {
 
     let client = AnvilDebugProviderFactory::from_node_on_block(node_url, BlockNumber::from(block_number)).await?;
 
-    let block_header = client.get_block_by_number(BlockNumberOrTag::Number(block_number), false).await?.unwrap().header;
+    let block_header =
+        client.get_block_by_number(BlockNumberOrTag::Number(block_number), BlockTransactionsKind::Hashes).await?.unwrap().header;
 
     let operator_address = Address::repeat_byte(0x12);
     let multicaller_address = Address::repeat_byte(0x78);
@@ -126,7 +127,7 @@ async fn main() -> Result<()> {
         let mut swapline = SwapLine { path: sp, amount_in: SwapAmountType::Set(in_amount), ..SwapLine::default() };
 
         match swapline.calculate_with_in_amount(&db, env.clone(), in_amount) {
-            Ok((out_amount, gas_used)) => {
+            Ok((out_amount, gas_used, _)) => {
                 info!("{} gas: {}  amount {} -> {}", sp_dto, gas_used, in_amount_f64, NWETH::to_float(out_amount));
                 swapline.amount_out = SwapAmountType::Set(out_amount)
             }
@@ -149,7 +150,7 @@ async fn main() -> Result<()> {
                 gas_needed
             }
             Err(e) => {
-                error!("Gas estimation error : {e}");
+                error!("Gas estimation error for {sp_dto}, err={e}");
                 0
             }
         };

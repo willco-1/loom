@@ -3,40 +3,50 @@ use std::fmt::{Display, Formatter};
 use std::process::exit;
 use std::time::Duration;
 
+use alloy_provider::network::TransactionResponse;
+
 use crate::flashbots_mock::mount_flashbots_mock;
 use crate::flashbots_mock::BundleRequest;
 use crate::test_config::TestConfig;
-use alloy_consensus::TxEnvelope;
 use alloy_primitives::{address, TxHash, U256};
 use alloy_provider::network::eip2718::Encodable2718;
 use alloy_provider::Provider;
 use alloy_rpc_types::{BlockId, BlockNumberOrTag, BlockTransactionsKind};
 use clap::Parser;
-use debug_provider::AnvilDebugProviderFactory;
-use defi_actors::{
-    fetch_and_add_pool_by_address, fetch_state_and_add_pool, AnvilBroadcastActor, ArbSwapPathMergerActor, BackrunConfig, BlockHistoryActor,
-    DiffPathMergerActor, EvmEstimatorActor, FlashbotsBroadcastActor, InitializeSignersOneShotBlockingActor,
-    MarketStatePreloadedOneShotActor, NodeBlockActor, NodeBlockActorConfig, NonceAndBalanceMonitorActor, PriceActor, SamePathMergerActor,
-    StateChangeArbActor, SwapRouterActor, TxSignersActor,
+use loom::node::debug_provider::AnvilDebugProviderFactory;
+
+use eyre::{ErrReport, OptionExt, Result};
+use loom::broadcast::accounts::{InitializeSignersOneShotBlockingActor, NonceAndBalanceMonitorActor, TxSignersActor};
+use loom::broadcast::broadcaster::{AnvilBroadcastActor, FlashbotsBroadcastActor};
+use loom::broadcast::flashbots::client::RelayConfig;
+use loom::broadcast::flashbots::Flashbots;
+use loom::core::actors::{Accessor, Actor, Broadcaster, Consumer, Producer, SharedState};
+use loom::core::block_history::BlockHistoryActor;
+use loom::core::router::SwapRouterActor;
+use loom::defi::address_book::TokenAddress;
+use loom::defi::market::{fetch_and_add_pool_by_address, fetch_state_and_add_pool};
+use loom::defi::pools::protocols::CurveProtocol;
+use loom::defi::pools::CurvePool;
+use loom::defi::preloader::MarketStatePreloadedOneShotActor;
+use loom::defi::price::PriceActor;
+use loom::evm::db::LoomDBType;
+use loom::evm::utils::evm_tx_env::env_from_signed_tx;
+use loom::evm::utils::NWETH;
+use loom::execution::estimator::EvmEstimatorActor;
+use loom::execution::multicaller::{MulticallerDeployer, MulticallerSwapEncoder};
+use loom::node::actor_config::NodeBlockActorConfig;
+use loom::node::json_rpc::NodeBlockActor;
+use loom::strategy::backrun::{BackrunConfig, StateChangeArbActor};
+use loom::strategy::merger::{ArbSwapPathMergerActor, DiffPathMergerActor, SamePathMergerActor};
+use loom::types::blockchain::{debug_trace_block, ChainParameters, Mempool};
+use loom::types::entities::{
+    AccountNonceAndBalanceState, BlockHistory, LatestBlock, Market, MarketState, PoolClass, Swap, Token, TxSigners,
 };
-use defi_address_book::TokenAddress;
-use defi_entities::{AccountNonceAndBalanceState, BlockHistory, LatestBlock, Market, MarketState, PoolClass, Swap, Token, TxSigners};
-use defi_events::{
+use loom::types::events::{
     MarketEvents, MempoolEvents, MessageBlock, MessageBlockHeader, MessageBlockLogs, MessageBlockStateUpdate, MessageHealthEvent,
     MessageTxCompose, TxCompose,
 };
-use defi_pools::protocols::CurveProtocol;
-use defi_pools::CurvePool;
-use defi_types::{debug_trace_block, ChainParameters, Mempool};
-use eyre::{OptionExt, Result};
-use flashbots::client::RelayConfig;
-use flashbots::Flashbots;
-use loom_actors::{Accessor, Actor, Broadcaster, Consumer, Producer, SharedState};
-use loom_multicaller::{MulticallerDeployer, MulticallerSwapEncoder};
-use loom_revm_db::LoomDBType;
-use loom_utils::evm::env_from_signed_tx;
-use loom_utils::NWETH;
-use revm::primitives::TxEnv;
+use revm::db::EmptyDBTyped;
 use tracing::{debug, error, info};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -122,7 +132,7 @@ async fn main() -> Result<()> {
     let test_config = TestConfig::from_file(args.config.clone()).await?;
     let node_url = env::var("MAINNET_WS")?;
     let client = AnvilDebugProviderFactory::from_node_on_block(node_url, test_config.settings.block).await?;
-    let priv_key = client.privkey()?;
+    let priv_key = client.privkey()?.to_bytes().to_vec();
 
     let mut mock_server: Option<MockServer> = None;
     if test_config.modules.flashbots {
@@ -149,7 +159,7 @@ async fn main() -> Result<()> {
 
     let block_header_with_txes = client.get_block(block_number.into(), BlockTransactionsKind::Full).await?.unwrap();
 
-    let cache_db = LoomDBType::default();
+    let cache_db = LoomDBType::default().with_ext_db(EmptyDBTyped::<ErrReport>::new());
     let mut market_instance = Market::default();
     let market_state_instance = MarketState::new(cache_db.clone());
 
@@ -200,7 +210,7 @@ async fn main() -> Result<()> {
 
     info!("Starting initialize signers actor");
 
-    let mut initialize_signers_actor = InitializeSignersOneShotBlockingActor::new(Some(priv_key.to_bytes().to_vec()));
+    let mut initialize_signers_actor = InitializeSignersOneShotBlockingActor::new(Some(priv_key));
     match initialize_signers_actor.access(tx_signers.clone()).access(accounts_state.clone()).start_and_wait() {
         Err(e) => {
             error!("{}", e);
@@ -264,7 +274,7 @@ async fn main() -> Result<()> {
     let mut nonce_and_balance_monitor = NonceAndBalanceMonitorActor::new(client.clone());
     match nonce_and_balance_monitor
         .access(accounts_state.clone())
-        .access(block_history_state.clone())
+        .access(latest_block.clone())
         .consume(market_events_channel.clone())
         .start()
     {
@@ -341,7 +351,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    let tx_compose_channel: Broadcaster<MessageTxCompose> = Broadcaster::new(100);
+    let tx_compose_channel: Broadcaster<MessageTxCompose<LoomDBType>> = Broadcaster::new(100);
 
     let mut broadcast_actor = AnvilBroadcastActor::new(client.clone());
     match broadcast_actor.consume(tx_compose_channel.clone()).start() {
@@ -538,29 +548,28 @@ async fn main() -> Result<()> {
             };
 
             let from = tx.from;
-            let to = tx.to.unwrap_or_default();
-            if let Ok(tx_env) = TryInto::<TxEnvelope>::try_into(tx.clone()) {
-                match tx_config.send.to_lowercase().as_str() {
-                    "mempool" => {
-                        let mut mempool_guard = mempool_instance.write().await;
-                        let tx_hash: TxHash = tx.hash;
+            let to = tx.to().unwrap_or_default();
 
-                        mempool_guard.add_tx(tx.clone());
-                        if let Err(e) = mempool_events_channel.send(MempoolEvents::MempoolActualTxUpdate { tx_hash }).await {
-                            error!("{e}");
-                        }
+            match tx_config.send.to_lowercase().as_str() {
+                "mempool" => {
+                    let mut mempool_guard = mempool_instance.write().await;
+                    let tx_hash: TxHash = tx.tx_hash();
+
+                    mempool_guard.add_tx(tx.clone());
+                    if let Err(e) = mempool_events_channel.send(MempoolEvents::MempoolActualTxUpdate { tx_hash }).await {
+                        error!("{e}");
                     }
-                    "block" => match client_clone.send_raw_transaction(tx_env.encoded_2718().as_slice()).await {
-                        Ok(p) => {
-                            debug!("Transaction sent {}", p.tx_hash());
-                        }
-                        Err(e) => {
-                            error!("Error sending transaction : {e}");
-                        }
-                    },
-                    _ => {
-                        debug!("Incorrect action {} for : hash {} from {} to {}  ", tx_config.send, tx_env.tx_hash(), from, to);
+                }
+                "block" => match client_clone.send_raw_transaction(tx.inner.encoded_2718().as_slice()).await {
+                    Ok(p) => {
+                        debug!("Transaction sent {}", p.tx_hash());
                     }
+                    Err(e) => {
+                        error!("Error sending transaction : {e}");
+                    }
+                },
+                _ => {
+                    debug!("Incorrect action {} for : hash {} from {} to {}  ", tx_config.send, tx.tx_hash(), from, to);
                 }
             }
         }
@@ -629,8 +638,7 @@ async fn main() -> Result<()> {
                     // print all transactions
                     for bundle in bundle_request.params {
                         for tx in bundle.transactions {
-                            let mut tx_env = TxEnv::default();
-                            env_from_signed_tx(&mut tx_env, tx)?;
+                            let tx_env = env_from_signed_tx(tx)?;
                             println!("tx={:?}", tx_env);
                         }
                     }

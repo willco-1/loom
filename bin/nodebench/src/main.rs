@@ -1,6 +1,5 @@
-use std::fmt::Formatter;
-use std::{collections::HashMap, fmt::Display, sync::Arc};
-
+use crate::cli::Cli;
+use alloy::network::primitives::BlockTransactionsKind;
 use alloy::primitives::{BlockHash, BlockNumber};
 use alloy::transports::BoxTransport;
 use alloy::{
@@ -13,14 +12,14 @@ use chrono::{DateTime, Duration, Local, TimeDelta};
 use clap::Parser;
 use eyre::{eyre, Result};
 use futures::future::join_all;
+use loom_core_blockchain::Blockchain;
+use loom_core_blockchain_actors::BlockchainActors;
+use loom_evm_db::LoomDB;
+use loom_node_actor_config::NodeBlockActorConfig;
+use loom_types_events::MempoolEvents;
+use std::fmt::Formatter;
+use std::{collections::HashMap, fmt::Display, sync::Arc};
 use tokio::{select, sync::RwLock, task::JoinHandle};
-
-use defi_actors::NodeBlockActorConfig;
-use defi_blockchain::Blockchain;
-use defi_blockchain_actors::BlockchainActors;
-use defi_events::MempoolEvents;
-
-use crate::cli::Cli;
 
 mod cli;
 
@@ -230,7 +229,7 @@ async fn collect_stat_task(
     blocks_needed: usize,
     ping_time: TimeDelta,
 ) -> Result<()> {
-    let bc = Blockchain::new(1);
+    let bc = Blockchain::<LoomDB>::new(1);
 
     let mut bc_actors = BlockchainActors::new(provider, bc.clone(), vec![]);
     if grps {
@@ -388,7 +387,7 @@ async fn main() -> Result<()> {
         let start_time = Local::now();
         for _i in 0u64..10 {
             let block_number = provider.get_block_number().await?;
-            let _ = provider.get_block_by_number(BlockNumberOrTag::Number(block_number), false).await?;
+            let _ = provider.get_block_by_number(BlockNumberOrTag::Number(block_number), BlockTransactionsKind::Hashes).await?;
         }
         let ping_time = (Local::now() - start_time) / (10 * 2);
         println!("Ping time {idx} : {ping_time}");
@@ -409,7 +408,8 @@ async fn main() -> Result<()> {
 
     for (block_number, _) in stat.block_headers.iter() {
         println!("Getting block {block_number}");
-        let block = first_provider.get_block_by_number(BlockNumberOrTag::Number(*block_number), false).await?.unwrap();
+        let block =
+            first_provider.get_block_by_number(BlockNumberOrTag::Number(*block_number), BlockTransactionsKind::Hashes).await?.unwrap();
 
         calc.total_txs += block.transactions.len();
 
