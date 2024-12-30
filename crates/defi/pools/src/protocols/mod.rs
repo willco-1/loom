@@ -4,6 +4,8 @@ pub use sushiswap::SushiswapProtocol;
 pub use uniswapv2::UniswapV2Protocol;
 pub use uniswapv3::UniswapV3Protocol;
 
+
+mod balancer;
 mod curve;
 mod helper;
 mod protocol;
